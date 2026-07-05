@@ -1,0 +1,29 @@
+{
+  "_doc": [
+    "Personalidad de cada robot REAL replicada en Webots (mediciones de lab).",
+    "gyro_scale: error físico del gyro (raw/real; 0.977 = sub-lee 2.3%).",
+    "yaw_scale_cal: lo que CALIBRATE guardó — corrige el gyro, con residuo real.",
+    "enc_scale: residuo de calibración PPR (mm medidos / mm reales).",
+    "motor_bias: desbalance izq/der (>1 = izquierda más fuerte → deriva).",
+    "aruco_pos_sigma / aruco_ang_sigma: jitter de la marca de ESE robot (mm, °).",
+    "Sin perfil para un id → robot ideal (todo 1.0, jitter 30mm/2°)."
+  ],
+  "1": {
+    "notas": "Atta_1 (18/06): gyro sub-lee ~2.3%; yaw_scale spread 1.014-1.023 (residuo ~-0.9%); marca ArUco ruidosa (jitter alto, misreads); offset -5° cámara-vs-gyro SIN modelar (diagnóstico abierto)",
+    "gyro_scale": 0.977,
+    "yaw_scale_cal": 1.014,
+    "enc_scale": 1.008,
+    "motor_bias": 1.006,
+    "aruco_pos_sigma": 45,
+    "aruco_ang_sigma": 3.0
+  },
+  "2": {
+    "notas": "Atta_2 (18/06): gyro sobre-lee ~0.5%, yaw_scale 0.9952 muy repetible; PPR con spread 1.8%; marca buena",
+    "gyro_scale": 1.005,
+    "yaw_scale_cal": 0.9952,
+    "enc_scale": 0.995,
+    "motor_bias": 0.997,
+    "aruco_pos_sigma": 20,
+    "aruco_ang_sigma": 1.5
+  }
+}

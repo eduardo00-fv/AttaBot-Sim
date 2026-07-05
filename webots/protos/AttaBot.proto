@@ -1,0 +1,135 @@
+#VRML_SIM R2025a utf8
+# AttaBot — robot diferencial del enjambre (dimensiones del firmware real):
+#   cuerpo cilíndrico r=75mm, ruedas Ø44.5mm en eje y a ±41.5mm del centro,
+#   3 sensores IR (frontal y ±30°, alcance 200mm), gyro (mimetiza el ICM-20948),
+#   encoders como PositionSensor en cada motor.
+# customData = id del robot ("1", "2", ...) — define su puerto UDP (6060+id).
+
+PROTO AttaBot [
+  field SFVec3f    translation  0 0 0
+  field SFRotation rotation     0 0 1 0
+  field SFString   name         "Atta_1"
+  field SFString   customData   "1"
+  field SFString   controller   "attabot_firmware"
+  field SFColor    bodyColor    0.75 0.2 0.2
+]
+{
+  Robot {
+    translation IS translation
+    rotation IS rotation
+    name IS name
+    customData IS customData
+    controller IS controller
+    children [
+      # ── Cuerpo ──────────────────────────────────────────────────────────
+      Pose {
+        translation 0 0 0.045
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor IS bodyColor
+              roughness 0.6
+              metalness 0
+            }
+            geometry Cylinder { radius 0.075 height 0.06 }
+          }
+        ]
+      }
+      # ── Rueda izquierda (+y) ────────────────────────────────────────────
+      HingeJoint {
+        jointParameters HingeJointParameters {
+          axis 0 1 0
+          anchor 0 0.0415 0.02225
+        }
+        device [
+          RotationalMotor { name "left wheel motor" maxVelocity 25 }
+          PositionSensor { name "left wheel sensor" }
+        ]
+        endPoint Solid {
+          translation 0 0.0415 0.02225
+          rotation 1 0 0 -1.5708
+          name "left wheel"
+          contactMaterial "attabot_wheel"
+          children [
+            Shape {
+              appearance PBRAppearance { baseColor 0.15 0.15 0.15 roughness 0.9 metalness 0 }
+              geometry Cylinder { radius 0.02225 height 0.008 }
+            }
+          ]
+          boundingObject Cylinder { radius 0.02225 height 0.008 }
+          physics Physics { density -1 mass 0.015 }
+        }
+      }
+      # ── Rueda derecha (−y) ──────────────────────────────────────────────
+      HingeJoint {
+        jointParameters HingeJointParameters {
+          axis 0 1 0
+          anchor 0 -0.0415 0.02225
+        }
+        device [
+          RotationalMotor { name "right wheel motor" maxVelocity 25 }
+          PositionSensor { name "right wheel sensor" }
+        ]
+        endPoint Solid {
+          translation 0 -0.0415 0.02225
+          rotation 1 0 0 -1.5708
+          name "right wheel"
+          contactMaterial "attabot_wheel"
+          children [
+            Shape {
+              appearance PBRAppearance { baseColor 0.15 0.15 0.15 roughness 0.9 metalness 0 }
+              geometry Cylinder { radius 0.02225 height 0.008 }
+            }
+          ]
+          boundingObject Cylinder { radius 0.02225 height 0.008 }
+          physics Physics { density -1 mass 0.015 }
+        }
+      }
+      # ── Sensores IR: frontal y ±30° (mismo layout que la sim 2D) ────────
+      DistanceSensor {
+        name "ir front"
+        translation 0.072 0 0.05
+        lookupTable [ 0 0 0.02, 0.25 0.25 0.02 ]
+        numberOfRays 2
+        aperture 0.5
+      }
+      DistanceSensor {
+        name "ir left"
+        translation 0.062 0.036 0.05
+        rotation 0 0 1 0.5236
+        lookupTable [ 0 0 0.02, 0.25 0.25 0.02 ]
+        numberOfRays 2
+        aperture 0.5
+      }
+      DistanceSensor {
+        name "ir right"
+        translation 0.062 -0.036 0.05
+        rotation 0 0 1 -0.5236
+        lookupTable [ 0 0 0.02, 0.25 0.25 0.02 ]
+        numberOfRays 2
+        aperture 0.5
+      }
+      # ── IMU ─────────────────────────────────────────────────────────────
+      Gyro { name "gyro" }
+    ]
+    # Cuerpo + 2 casters esféricos (baja fricción, hacen de rueda loca)
+    boundingObject Group {
+      children [
+        Pose {
+          translation 0 0 0.045
+          children [ Cylinder { radius 0.075 height 0.06 } ]
+        }
+        Pose {
+          translation 0.055 0 0.008
+          children [ Sphere { radius 0.008 } ]
+        }
+        Pose {
+          translation -0.055 0 0.008
+          children [ Sphere { radius 0.008 } ]
+        }
+      ]
+    }
+    contactMaterial "attabot_body"
+    physics Physics { density -1 mass 0.35 }
+  }
+}

@@ -1,0 +1,96 @@
+#VRML_SIM R2025a utf8
+# Arena AttaBot — mismas dimensiones útiles que el FOV del lab (~2.4 × 1.55 m).
+# Marco de coordenadas "cámara" (el que hablan robots y base virtual):
+#   origen en la esquina superior-izquierda, x→ancho, y→abajo, ángulo CW.
+#   Conversión desde Webots (z arriba, arena centrada): la hace base_camera.py.
+
+EXTERNPROTO "../protos/AttaBot.proto"
+
+WorldInfo {
+  basicTimeStep 8
+  contactProperties [
+    ContactProperties {
+      material1 "attabot_body"
+      coulombFriction [ 0.05 ]
+    }
+    ContactProperties {
+      material1 "attabot_wheel"
+      coulombFriction [ 3 ]
+    }
+  ]
+}
+Viewpoint {
+  orientation 0 1 0 1.2
+  position -2.6 0 2.2
+}
+Background {
+  skyColor [ 0.6 0.7 0.8 ]
+}
+DirectionalLight {
+  direction 0.3 -0.2 -1
+  intensity 2.5
+  castShadows TRUE
+}
+# ── Piso ──────────────────────────────────────────────────────────────────
+Solid {
+  name "floor"
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.85 0.85 0.82 roughness 1 metalness 0 }
+      geometry Box { size 2.4 1.55 0.02 }
+    }
+  ]
+  translation 0 0 -0.01
+  boundingObject Box { size 2.4 1.55 0.02 }
+}
+# ── Paredes ───────────────────────────────────────────────────────────────
+Solid {
+  name "wall north"
+  translation 0 0.785 0.05
+  children [ Shape { appearance PBRAppearance { baseColor 0.4 0.4 0.45 roughness 1 metalness 0 } geometry Box { size 2.44 0.02 0.1 } } ]
+  boundingObject Box { size 2.44 0.02 0.1 }
+}
+Solid {
+  name "wall south"
+  translation 0 -0.785 0.05
+  children [ Shape { appearance PBRAppearance { baseColor 0.4 0.4 0.45 roughness 1 metalness 0 } geometry Box { size 2.44 0.02 0.1 } } ]
+  boundingObject Box { size 2.44 0.02 0.1 }
+}
+Solid {
+  name "wall east"
+  translation 1.21 0 0.05
+  children [ Shape { appearance PBRAppearance { baseColor 0.4 0.4 0.45 roughness 1 metalness 0 } geometry Box { size 0.02 1.55 0.1 } } ]
+  boundingObject Box { size 0.02 1.55 0.1 }
+}
+Solid {
+  name "wall west"
+  translation -1.21 0 0.05
+  children [ Shape { appearance PBRAppearance { baseColor 0.4 0.4 0.45 roughness 1 metalness 0 } geometry Box { size 0.02 1.55 0.1 } } ]
+  boundingObject Box { size 0.02 1.55 0.1 }
+}
+# ── Obstáculo de prueba (centro-ish, coords cámara ≈ (1100, 650)) ─────────
+Solid {
+  name "obstacle box"
+  translation -0.1 0.125 0.05
+  children [ Shape { appearance PBRAppearance { baseColor 0.55 0.35 0.2 roughness 1 metalness 0 } geometry Box { size 0.15 0.15 0.1 } } ]
+  boundingObject Box { size 0.15 0.15 0.1 }
+}
+# ── Robots (coords cámara: Atta_1 en (300,300), Atta_2 en (300,1200)) ─────
+AttaBot {
+  translation -0.9 0.475 0
+  name "Atta_1"
+  customData "1"
+  bodyColor 0.75 0.2 0.2
+}
+AttaBot {
+  translation -0.9 -0.425 0
+  name "Atta_2"
+  customData "2"
+  bodyColor 0.2 0.35 0.75
+}
+# ── Base virtual (cámara ArUco simulada + router UDP) ─────────────────────
+Robot {
+  name "base_camera"
+  controller "base_camera"
+  supervisor TRUE
+}

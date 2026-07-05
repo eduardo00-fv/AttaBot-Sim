@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+sim_output_*.png
+webots/worlds/.attabot.wbproj
+*.log
