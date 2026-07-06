@@ -144,9 +144,9 @@ class EKFNav(ReactiveNav):
             bias = -AVOID_FRONT_ANGLE if rel_goal >= 0 else AVOID_FRONT_ANGLE
             avoiding = True
         elif ir['right']:
-            bias, avoiding = AVOID_SIDE_ANGLE, True
+            bias, avoiding = -AVOID_SIDE_ANGLE, True   # derecha → girar izquierda
         elif ir['left']:
-            bias, avoiding = -AVOID_SIDE_ANGLE, True
+            bias, avoiding = AVOID_SIDE_ANGLE, True    # izquierda → girar derecha
 
         final_angle = (goal_angle + bias) % 360
         angle_diff = normalize_angle(final_angle - pangle)

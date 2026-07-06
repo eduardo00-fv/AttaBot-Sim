@@ -46,13 +46,21 @@ dt = int(sup.getBasicTimeStep()) * 2
 
 # ── Descubrir los AttaBots del mundo ─────────────────────────────────────────
 robots = {}   # id (str) → node
+objects = []  # (color, node) — objetos consultables por COLOR_QUERY
+COLOR_BY_NAME = {'obstacle box': 'café', 'target rojo': 'rojo'}
 children = sup.getRoot().getField('children')
 for i in range(children.getCount()):
     node = children.getMFNode(i)
     if node.getTypeName() == 'AttaBot':
         rid = node.getField('customData').getSFString()
         robots[rid] = node
-print(f'[base] robots detectados: {sorted(robots)}')
+    elif node.getTypeName() == 'Solid':
+        name = node.getField('name').getSFString()
+        for prefix, color in COLOR_BY_NAME.items():
+            if name.startswith(prefix):
+                objects.append((color, node))
+print(f'[base] robots detectados: {sorted(robots)} · '
+      f'objetos: {[c for c, _ in objects]}')
 
 
 def camera_pose(node):
@@ -144,6 +152,22 @@ while sup.step(dt) != -1:
                 ang = (ang + random.gauss(0, sa)) % 360
                 sock.sendto(f'POSITION_RESPONSE|{x:.1f}|{y:.1f}|{ang:.1f}'.encode(),
                             addr)
+            elif msg == 'COLOR_QUERY':
+                # APDS virtual: color del objeto a <250mm y ±45° del frente
+                x, y, ang = camera_pose(robots[sender])
+                best, best_d = 'nada', 1e9
+                for color, node in objects:
+                    ox, oy, _ = camera_pose(node)
+                    d = math.hypot(ox - x, oy - y)
+                    if d > 250 or d >= best_d:
+                        continue
+                    to_obj = math.degrees(math.atan2(oy - y, ox - x)) % 360
+                    diff = abs(((to_obj - ang) + 180) % 360 - 180)
+                    if diff < 45:
+                        best, best_d = color, d
+                if best == 'nada' and min(x, y, 2400 - x, 1550 - y) < 220:
+                    best = 'pared'
+                sock.sendto(f'COLOR_RESPONSE|{best}'.encode(), addr)
             elif msg.startswith('LEADER_POSITION'):
                 for rid in robots:
                     if rid != sender:

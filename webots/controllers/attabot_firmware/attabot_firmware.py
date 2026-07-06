@@ -25,6 +25,7 @@ NAV_CONFIG|PARKING_DIST|mm.
 import json
 import math
 import os
+import random
 import socket
 import sys
 
@@ -129,6 +130,12 @@ class AttabotFirmware:
         self.prop_k_side = PROP_K_SIDE       # tuneables vía NAV_CONFIG|PROP|...
         self.prop_k_front = PROP_K_FRONT
         self.avoid_horizon = AVOID_HORIZON
+
+        # Búsqueda semántica (SEARCH_OBJECT|color): patrulla aleatoria +
+        # aproximación al detectar + consulta de color (APDS virtual/real)
+        self.search_color = None
+        self.awaiting_color = False
+        self.approach_start = 0
 
         # Congregación (port del firmware nuevo: staging + slot del lado propio)
         self.cong_leader = None
@@ -237,7 +244,37 @@ class AttabotFirmware:
                                f'corr#{self.turn_corr}')
                     self.turn_corr = 0
                 self.start_next()
+        elif self.state == 'APPROACH':
+            # Aproximación lenta al candidato hasta el alcance del APDS (~12cm)
+            d = self.read_ir_dist()
+            if d['front'] < 0.12:
+                self.stop_motors()
+                self.state = 'IDLE'
+                self.awaiting_color = True
+                self.approach_start = self.now_ms()
+                self.send_base('COLOR_QUERY')
+                self.debug('candidato al alcance — consultando color')
+            elif d['front'] > 0.40:
+                self.stop_motors()
+                self.state = 'IDLE'
+                self.debug('candidato perdido — sigo patrullando')
+                self.request_position()
+            elif self.now_ms() - self.approach_start > 6000:
+                self.stop_motors()
+                self.state = 'IDLE'
+                self.queue = [('MOVE', -80.0), ('TURN', 60.0), ('MOVE', 120.0)]
+                self.start_next()
         elif self.state == 'MOVE':
+            # Búsqueda activa: algo de frente = candidato → aproximarse en
+            # vez de evadir (los laterales siguen evadiendo normal)
+            if self.search_color and self.move_sign > 0 \
+                    and self.read_ir_dist()['front'] < 0.25:
+                self.queue.clear()
+                self.state = 'APPROACH'
+                self.approach_start = self.now_ms()
+                self.set_wheels(2.0, 2.0)
+                self.debug('candidato detectado — aproximando')
+                return
             # Sin chequeo de emergencia al RETROCEDER (los sensores frontales
             # siguen viendo el obstáculo del que nos alejamos)
             if self.move_sign > 0:
@@ -318,21 +355,22 @@ class AttabotFirmware:
         if self.avoid_mode == 'prop':
             result = self.prop_step(pose)
         else:
-            # EKFNav (port 2D) tiene izq/der ESPEJADOS respecto al mundo
-            # físico (su check_ir define 'left' en cámara+30° = derecha
-            # física; los signos de bias son consistentes con eso). Adaptamos
-            # aquí sin tocar el código 2D validado. TODO: corregir en
-            # attabot_sim.py + re-validar escenarios 2D.
-            ir = self.read_ir()
-            ir_nav = {'front': ir['front'],
-                      'left': ir['right'], 'right': ir['left']}
-            result = self.nav.step_pose(pose, ir_nav)
+            # (Fix 2026-07-05: el espejo izq/der del port 2D se corrigió en
+            # attabot_sim/ekf_sim — ya no hace falta adaptador.)
+            result = self.nav.step_pose(pose, self.read_ir())
         if result is None:
             # ¿Etapa de staging de congregación completada?
             if self.cong_leader and not self.staging_done and self.slot:
                 self.staging_done = True
                 self.nav.start(*self.slot)
                 self.debug(f'staging listo, entrando al slot {self.slot}')
+                self.nav_step(pose)
+                return
+            if self.search_color:
+                # Punto de patrulla alcanzado sin hallazgo → siguiente
+                gx, gy = random.uniform(350, 2050), random.uniform(350, 1200)
+                self.nav.start(gx, gy)
+                self.debug(f'patrulla → ({gx:.0f},{gy:.0f})')
                 self.nav_step(pose)
                 return
             self.debug(f'NAV: llegó a ({pose[0]:.1f},{pose[1]:.1f})')
@@ -425,11 +463,43 @@ class AttabotFirmware:
 
         elif cmd in ('CANCEL_CONGREGATION', 'ABORT_NAV', 'STOP'):
             self.cong_leader = None
+            self.search_color = None
+            self.awaiting_color = False
             self.nav.is_active = False
             self.queue.clear()
             self.stop_motors()
             self.state = 'IDLE'
             self.debug(f'{cmd} ejecutado')
+
+        elif cmd == 'SEARCH_OBJECT':
+            self.search_color = parts[1]
+            gx, gy = random.uniform(350, 2050), random.uniform(350, 1200)
+            self.nav.start(gx, gy)
+            self.debug(f'buscando objeto {self.search_color} — '
+                       f'patrulla → ({gx:.0f},{gy:.0f})')
+            self.request_position()
+
+        elif cmd == 'COLOR_RESPONSE':
+            self.awaiting_color = False
+            color = parts[1]
+            if self.search_color and color == self.search_color:
+                # El objeto está ~160mm frente al robot (120 del sensor + radio)
+                ex, ey, eth = self.ekf.pose() if self.ekf.initialized else (0, 0, 0)
+                ox = ex + 160.0 * math.cos(math.radians(eth))
+                oy = ey + 160.0 * math.sin(math.radians(eth))
+                self.debug(f'🎯 OBJETO {color.upper()} ENCONTRADO en '
+                           f'({ox:.0f},{oy:.0f})')
+                self.send_base(f'OBJECT_FOUND|{self.robot_id}|{ox:.0f}|{oy:.0f}'
+                               f'|{color}')
+                self.search_color = None
+                self.nav.is_active = False
+                self.queue.clear()
+                self.stop_motors()
+            else:
+                self.debug(f'candidato es "{color}" — no es '
+                           f'{self.search_color}; evado y sigo')
+                self.queue = [('MOVE', -80.0), ('TURN', 60.0), ('MOVE', 120.0)]
+                self.start_next()
 
         elif cmd == 'EKF_NAV':
             self.ekf_nav = parts[1] == '1'
@@ -487,6 +557,10 @@ class AttabotFirmware:
             elif self.nav.is_active and self.waiting_pos \
                     and self.now_ms() - self.last_request > 3000:
                 self.request_position()
+            # Reintento de COLOR_QUERY si la respuesta se perdió
+            if self.awaiting_color and self.now_ms() - self.approach_start > 2500:
+                self.approach_start = self.now_ms()
+                self.send_base('COLOR_QUERY')
             # Telemetría: pose EKF cada 1s mientras navega (para graficar)
             if self.nav.is_active and self.ekf.initialized \
                and self.now_ms() - self.last_ekfpose > 1000:

@@ -144,10 +144,14 @@ class SimWorld:
         # Solo obstáculos físicos — otros robots se detectan por ArUco, no por IR
         targets = [(o.x, o.y, o.radius) for o in self.obstacles]
 
+        # Marco cámara (y abajo, ángulo CW): la IZQUIERDA física del robot
+        # está en angle−30 y la derecha en angle+30. (Fix 2026-07-05: estaban
+        # espejados — consistente con los signos de bias de entonces, por eso
+        # nunca falló en 2D, pero contradecía al mundo físico de Webots.)
         sensor_angles = {
             'front': robot.angle,
-            'right': robot.angle - 30,
-            'left':  robot.angle + 30,
+            'right': robot.angle + 30,
+            'left':  robot.angle - 30,
         }
         result = {'front': False, 'right': False, 'left': False}
 
@@ -221,10 +225,10 @@ class ReactiveNav:
             bias     = -AVOID_FRONT_ANGLE if rel_goal >= 0 else AVOID_FRONT_ANGLE
             avoiding = True
         elif right:
-            bias     = AVOID_SIDE_ANGLE    # lean izquierda
+            bias     = -AVOID_SIDE_ANGLE   # derecha bloqueada → girar izquierda
             avoiding = True
         elif left:
-            bias     = -AVOID_SIDE_ANGLE   # lean derecha
+            bias     = AVOID_SIDE_ANGLE    # izquierda bloqueada → girar derecha
             avoiding = True
 
         final_angle = (goal_angle + bias) % 360
