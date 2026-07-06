@@ -40,8 +40,8 @@ CENTER_TO_WHEEL = 41.5
 IR_THRESHOLD_M  = 0.20      # obstáculo si el IR reporta menos de esto
 
 PROP_K_SIDE  = 55.0         # ° de bias lateral máximo (evasión proporcional)
-PROP_K_FRONT = 90.0         # ° de bias frontal máximo (evasión proporcional)
-AVOID_HORIZON = 0.35        # m — distancia de reacción (independiente del sensor)
+PROP_K_FRONT = 70.0         # ° de bias frontal máximo (tuneado en sim 2026-07-05)
+AVOID_HORIZON = 0.45        # m — distancia de reacción (tuneado en sim 2026-07-05)
 
 MOVE_SPEED   = 8.0          # rad/s de rueda (~178 mm/s)
 TURN_SPEED   = 2.5          # rad/s de rueda (~77 °/s de giro)
@@ -126,6 +126,9 @@ class AttabotFirmware:
         # proporcional a la distancia (lo que habilitaría un ToF VL53L0X)
         self.avoid_mode = 'binary'
         self.ir_range = IR_THRESHOLD_M   # m — alcance efectivo del sensor
+        self.prop_k_side = PROP_K_SIDE       # tuneables vía NAV_CONFIG|PROP|...
+        self.prop_k_front = PROP_K_FRONT
+        self.avoid_horizon = AVOID_HORIZON
 
         # Congregación (port del firmware nuevo: staging + slot del lado propio)
         self.cong_leader = None
@@ -289,18 +292,18 @@ class AttabotFirmware:
         # Horizonte de reacción ≠ alcance del sensor: con ToF de 0.6m el robot
         # vería las paredes de la arena casi siempre — solo reaccionamos a lo
         # que está a menos de AVOID_HORIZON (el sensor más corto lo limita)
-        h = min(self.ir_range, AVOID_HORIZON)
+        h = min(self.ir_range, self.avoid_horizon)
         d = self.read_ir_dist()
         prox = {k: max(0.0, 1.0 - v / h) for k, v in d.items()}
         # Repulsión lateral: alejarse del lado más cercano, gradualmente.
         # Bias positivo = girar derecha ⇒ derecha ocupada resta, izquierda suma
-        bias = PROP_K_SIDE * (prox['left'] - prox['right'])
+        bias = self.prop_k_side * (prox['left'] - prox['right'])
         # Frontal: abrirse ALEJÁNDOSE del lado del goal — rodear por el lado
         # del goal hace que corte la esquina rozando el obstáculo (medido)
         if prox['front'] > 0:
             rel_goal = normalize_angle(goal_angle - pangle)
             sign = -1 if rel_goal >= 0 else 1
-            bias += sign * PROP_K_FRONT * prox['front']
+            bias += sign * self.prop_k_front * prox['front']
 
         worst = max(prox.values())
         seg = min(dist * 0.9, SEGMENT_DISTANCE) * (1.0 - 0.7 * worst)
@@ -443,6 +446,15 @@ class AttabotFirmware:
         elif cmd == 'NAV_CONFIG' and parts[1] == 'IR_RANGE':
             self.ir_range = float(parts[2])
             self.debug(f'ir_range={self.ir_range:.2f}m')
+
+        elif cmd == 'NAV_CONFIG' and parts[1] == 'PROP':
+            # NAV_CONFIG|PROP|k_side|k_front|horizonte_m
+            self.prop_k_side = float(parts[2])
+            self.prop_k_front = float(parts[3])
+            self.avoid_horizon = float(parts[4])
+            self.debug(f'prop k_side={self.prop_k_side:.0f} '
+                       f'k_front={self.prop_k_front:.0f} '
+                       f'horizonte={self.avoid_horizon:.2f}m')
 
         elif cmd == 'GET_STATUS':
             e = self.ekf

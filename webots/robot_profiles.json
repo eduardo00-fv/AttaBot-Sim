@@ -9,13 +9,13 @@
     "Sin perfil para un id → robot ideal (todo 1.0, jitter 30mm/2°)."
   ],
   "1": {
-    "notas": "Atta_1 (18/06): gyro sub-lee ~2.3%; yaw_scale spread 1.014-1.023 (residuo ~-0.9%); marca ArUco ruidosa (jitter alto, misreads); offset -5° cámara-vs-gyro SIN modelar (diagnóstico abierto)",
+    "notas": "Atta_1 (18/06): gyro sub-lee ~2.3%; yaw_scale spread 1.014-1.023 (residuo ~-0.9%); marca ArUco ruidosa (jitter alto, misreads); offset -5° cámara-vs-gyro SIN modelar (diagnóstico abierto) | CORREGIDO 05-07: el jitter ESTACIONARIO de la marca 1 es igual al de la 2 (~10mm mediana, auditoría de todos los PositionLogs); sus problemas reales son dropouts/misreads transitorios, no ruido estático",
     "gyro_scale": 0.977,
     "yaw_scale_cal": 1.014,
     "enc_scale": 1.008,
     "motor_bias": 1.006,
-    "aruco_pos_sigma": 45,
-    "aruco_ang_sigma": 3.0
+    "aruco_pos_sigma": 30,
+    "aruco_ang_sigma": 2.0
   },
   "2": {
     "notas": "Atta_2 (18/06): gyro sobre-lee ~0.5%, yaw_scale 0.9952 muy repetible; PPR con spread 1.8%; marca buena",
@@ -23,7 +23,7 @@
     "yaw_scale_cal": 0.9952,
     "enc_scale": 0.995,
     "motor_bias": 0.997,
-    "aruco_pos_sigma": 20,
-    "aruco_ang_sigma": 1.5
+    "aruco_pos_sigma": 30,
+    "aruco_ang_sigma": 2.0
   }
 }

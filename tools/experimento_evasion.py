@@ -36,6 +36,32 @@ ARMS = [('binary', 0.20), ('prop', 0.20), ('prop', 0.60)]
 LEG_TIMEOUT_SIM = 180.0   # s sim por pierna
 
 
+def arm_cmds(mode, ir_range, k_side=55, k_front=90, horizon=0.35):
+    return [f'1.NAV_CONFIG|AVOID|{mode}',
+            f'1.NAV_CONFIG|IR_RANGE|{ir_range}',
+            f'1.NAV_CONFIG|PROP|{k_side}|{k_front}|{horizon}']
+
+
+# Barrido de parámetros de prop (sensor fijo 0.6m): un factor a la vez
+SWEEP = [
+    ('base_55/90/.35', arm_cmds('prop', 0.6)),
+    ('kside40',        arm_cmds('prop', 0.6, k_side=40)),
+    ('kside70',        arm_cmds('prop', 0.6, k_side=70)),
+    ('kfront70',       arm_cmds('prop', 0.6, k_front=70)),
+    ('kfront110',      arm_cmds('prop', 0.6, k_front=110)),
+    ('horiz0.30',      arm_cmds('prop', 0.6, horizon=0.30)),
+    ('horiz0.45',      arm_cmds('prop', 0.6, horizon=0.45)),
+]
+
+# Confirmación del combo ganador del barrido (kfront↓ + horizonte↑)
+CONFIRM = [
+    ('base_55/90/.35', arm_cmds('prop', 0.6)),
+    ('combo_55/70/.45', arm_cmds('prop', 0.6, k_front=70, horizon=0.45)),
+    ('combo_40/70/.45', arm_cmds('prop', 0.6, k_side=40, k_front=70,
+                                 horizon=0.45)),
+]
+
+
 def clearance(x, y):
     """Holgura superficie-a-superficie robot↔caja más cercana (mm)."""
     best = 1e9
@@ -48,7 +74,17 @@ def clearance(x, y):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--legs', type=int, default=6)
+    ap.add_argument('--sweep', action='store_true',
+                    help='barrido de parámetros prop en vez de los 3 brazos')
+    ap.add_argument('--confirm', action='store_true',
+                    help='confirmación del combo ganador del barrido')
     a = ap.parse_args()
+    if a.sweep:
+        arms = SWEEP
+    elif a.confirm:
+        arms = CONFIRM
+    else:
+        arms = [(f'{m}@{r:.2f}', arm_cmds(m, r)) for m, r in ARMS]
 
     env = dict(os.environ)
     env.setdefault('XAUTHORITY', os.path.expanduser('~/.Xauthority'))
@@ -105,10 +141,9 @@ def main():
     time.sleep(1)
 
     results = {}
-    for mode, ir_range in ARMS:
-        arm = f'{mode}@{ir_range:.2f}'
-        cmd(f'1.NAV_CONFIG|AVOID|{mode}')
-        cmd(f'1.NAV_CONFIG|IR_RANGE|{ir_range}')
+    for arm, cmds in arms:
+        for c in cmds:
+            cmd(c)
         time.sleep(0.5)
         legs = []
         for i in range(a.legs):
