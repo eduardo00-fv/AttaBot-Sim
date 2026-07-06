@@ -32,11 +32,16 @@ from controller import Robot
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'sim'))
 from ekf_sim import EKF, EKFNav  # noqa: E402
+from attabot_sim import normalize_angle, SEGMENT_DISTANCE  # noqa: E402
 
 # ── Constantes físicas (mismas del firmware/PROTO) ───────────────────────────
 WHEEL_RADIUS_MM = 22.25
 CENTER_TO_WHEEL = 41.5
 IR_THRESHOLD_M  = 0.20      # obstáculo si el IR reporta menos de esto
+
+PROP_K_SIDE  = 55.0         # ° de bias lateral máximo (evasión proporcional)
+PROP_K_FRONT = 90.0         # ° de bias frontal máximo (evasión proporcional)
+AVOID_HORIZON = 0.35        # m — distancia de reacción (independiente del sensor)
 
 MOVE_SPEED   = 8.0          # rad/s de rueda (~178 mm/s)
 TURN_SPEED   = 2.5          # rad/s de rueda (~77 °/s de giro)
@@ -117,6 +122,11 @@ class AttabotFirmware:
         self.pose = None             # última pose ArUco recibida
         self.last_ekfpose = 0.0      # telemetría EKFPOSE periódica
 
+        # Evasión: 'binary' = umbral fijo (los IR de hoy); 'prop' = bias
+        # proporcional a la distancia (lo que habilitaría un ToF VL53L0X)
+        self.avoid_mode = 'binary'
+        self.ir_range = IR_THRESHOLD_M   # m — alcance efectivo del sensor
+
         # Congregación (port del firmware nuevo: staging + slot del lado propio)
         self.cong_leader = None
         self.cong_idx = 0
@@ -139,7 +149,11 @@ class AttabotFirmware:
         self.send_base(msg)
 
     def read_ir(self):
-        return {k: (d.getValue() < IR_THRESHOLD_M) for k, d in self.irs.items()}
+        return {k: (d.getValue() < self.ir_range) for k, d in self.irs.items()}
+
+    def read_ir_dist(self):
+        """Distancias en metros (lo que daría un ToF real)."""
+        return {k: d.getValue() for k, d in self.irs.items()}
 
     def set_wheels(self, vl, vr):
         # Desbalance físico de motores del robot real (deriva en MOVE, giros
@@ -221,15 +235,32 @@ class AttabotFirmware:
                     self.turn_corr = 0
                 self.start_next()
         elif self.state == 'MOVE':
-            ir = self.read_ir()
-            if any(ir.values()):
-                self.stop_motors()
-                self.debug(f'MOVE interrumpido por IR {ir}')
-                self.queue.clear()
-                self.state = 'IDLE'
-                if self.nav.is_active:
-                    self.request_position()
-                return
+            # Sin chequeo de emergencia al RETROCEDER (los sensores frontales
+            # siguen viendo el obstáculo del que nos alejamos)
+            if self.move_sign > 0:
+                if self.avoid_mode == 'prop':
+                    # Proporcional: el bias ya curvó la ruta — frenar solo en
+                    # emergencia real (el segmento en curso es recto)
+                    d = self.read_ir_dist()
+                    emergency = d['front'] < 0.15 or d['left'] < 0.10 \
+                        or d['right'] < 0.10
+                else:
+                    emergency = any(self.read_ir().values())
+                if emergency:
+                    self.stop_motors()
+                    # Evasión COMPROMETIDA (como el firmware real: giro ±45-60
+                    # + avance). Solo retroceder no basta: deja al obstáculo
+                    # justo fuera del alcance del sensor y el re-planeo ciego
+                    # vuelve a apuntarle (vaivén infinito, visto en sim).
+                    # TURN positivo = derecha (CW visto desde arriba, marco
+                    # cámara). Izquierda más libre → girar izquierda = negativo
+                    d = self.read_ir_dist()
+                    side = -60.0 if d['left'] > d['right'] else 60.0
+                    self.debug(f'MOVE interrumpido por IR — evasión {side:+.0f}°')
+                    self.queue = [('MOVE', -80.0), ('TURN', side),
+                                  ('MOVE', 120.0)]
+                    self.start_next()
+                    return
             if self.move_acc >= self.move_target:
                 self.stop_motors()
                 self.debug('Movimiento completado')
@@ -241,8 +272,58 @@ class AttabotFirmware:
         self.last_request = self.now_ms()
         self.send_base('REQUEST_POSITION')
 
+    def prop_step(self, pose):
+        """Paso de navegación con evasión PROPORCIONAL a la distancia (ToF).
+        Mismo contrato que EKFNav.step_pose; el bias crece al acercarse en
+        vez de saltar a un ángulo fijo, y el segmento se acorta cerca de
+        obstáculos. Experimental — si valida, se porta al firmware real."""
+        px, py, pangle = pose
+        if self.nav.has_reached(px, py):
+            self.nav.is_active = False
+            return None
+        dx = self.nav.goal_x - px
+        dy = self.nav.goal_y - py
+        dist = math.hypot(dx, dy)
+        goal_angle = math.degrees(math.atan2(dy, dx)) % 360
+
+        # Horizonte de reacción ≠ alcance del sensor: con ToF de 0.6m el robot
+        # vería las paredes de la arena casi siempre — solo reaccionamos a lo
+        # que está a menos de AVOID_HORIZON (el sensor más corto lo limita)
+        h = min(self.ir_range, AVOID_HORIZON)
+        d = self.read_ir_dist()
+        prox = {k: max(0.0, 1.0 - v / h) for k, v in d.items()}
+        # Repulsión lateral: alejarse del lado más cercano, gradualmente.
+        # Bias positivo = girar derecha ⇒ derecha ocupada resta, izquierda suma
+        bias = PROP_K_SIDE * (prox['left'] - prox['right'])
+        # Frontal: abrirse ALEJÁNDOSE del lado del goal — rodear por el lado
+        # del goal hace que corte la esquina rozando el obstáculo (medido)
+        if prox['front'] > 0:
+            rel_goal = normalize_angle(goal_angle - pangle)
+            sign = -1 if rel_goal >= 0 else 1
+            bias += sign * PROP_K_FRONT * prox['front']
+
+        worst = max(prox.values())
+        seg = min(dist * 0.9, SEGMENT_DISTANCE) * (1.0 - 0.7 * worst)
+        seg = max(40.0, seg)
+
+        final_angle = (goal_angle + bias) % 360
+        angle_diff = normalize_angle(final_angle - pangle)
+        self.nav.steps += 1
+        return math.radians(angle_diff) * CENTER_TO_WHEEL, seg
+
     def nav_step(self, pose):
-        result = self.nav.step_pose(pose, self.read_ir())
+        if self.avoid_mode == 'prop':
+            result = self.prop_step(pose)
+        else:
+            # EKFNav (port 2D) tiene izq/der ESPEJADOS respecto al mundo
+            # físico (su check_ir define 'left' en cámara+30° = derecha
+            # física; los signos de bias son consistentes con eso). Adaptamos
+            # aquí sin tocar el código 2D validado. TODO: corregir en
+            # attabot_sim.py + re-validar escenarios 2D.
+            ir = self.read_ir()
+            ir_nav = {'front': ir['front'],
+                      'left': ir['right'], 'right': ir['left']}
+            result = self.nav.step_pose(pose, ir_nav)
         if result is None:
             # ¿Etapa de staging de congregación completada?
             if self.cong_leader and not self.staging_done and self.slot:
@@ -354,6 +435,14 @@ class AttabotFirmware:
         elif cmd == 'NAV_CONFIG' and parts[1] == 'PARKING_DIST':
             self.parking_dist = float(parts[2])
             self.debug(f'parking={self.parking_dist:.0f}mm')
+
+        elif cmd == 'NAV_CONFIG' and parts[1] == 'AVOID':
+            self.avoid_mode = 'prop' if parts[2] == 'prop' else 'binary'
+            self.debug(f'evasión={self.avoid_mode}')
+
+        elif cmd == 'NAV_CONFIG' and parts[1] == 'IR_RANGE':
+            self.ir_range = float(parts[2])
+            self.debug(f'ir_range={self.ir_range:.2f}m')
 
         elif cmd == 'GET_STATUS':
             e = self.ekf

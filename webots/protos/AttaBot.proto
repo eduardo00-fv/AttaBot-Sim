@@ -89,7 +89,7 @@ PROTO AttaBot [
       DistanceSensor {
         name "ir front"
         translation 0.072 0 0.05
-        lookupTable [ 0 0 0.02, 0.25 0.25 0.02 ]
+        lookupTable [ 0 0 0.02, 0.7 0.7 0.02 ]
         numberOfRays 2
         aperture 0.5
       }
@@ -97,7 +97,7 @@ PROTO AttaBot [
         name "ir left"
         translation 0.062 0.036 0.05
         rotation 0 0 1 0.5236
-        lookupTable [ 0 0 0.02, 0.25 0.25 0.02 ]
+        lookupTable [ 0 0 0.02, 0.7 0.7 0.02 ]
         numberOfRays 2
         aperture 0.5
       }
@@ -105,7 +105,7 @@ PROTO AttaBot [
         name "ir right"
         translation 0.062 -0.036 0.05
         rotation 0 0 1 -0.5236
-        lookupTable [ 0 0 0.02, 0.25 0.25 0.02 ]
+        lookupTable [ 0 0 0.02, 0.7 0.7 0.02 ]
         numberOfRays 2
         aperture 0.5
       }
