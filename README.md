@@ -49,7 +49,21 @@ python3 webots/console.py          # consola de comandos (otra terminal)
 
 # Validar controllers sin abrir Webots:
 python3 tools/mock_webots/harness.py
+
+# La base REAL del lab controlando la simulación (genera PositionLogs/
+# ConsoleLogs en formato lab — orden: base primero, Webots después):
+cd ~/Documents/Atta-Bot-P_ed/Base && python AttaBot_Base.py --sim
+flatpak run com.cyberbotics.webots webots/worlds/attabot.wbt
+
+# E2E automático de lo anterior (GT + oclusión + congregación + verificación):
+python3 tools/experimento_base_real.py
 ```
+
+Cuando la base real toma el puerto 6060, `base_camera.py` lo detecta y pasa a
+**modo solo-cámara**: emite las detecciones (con el jitter de cada marca) a la
+base por UDP y deja de responder posiciones él mismo. Los comandos se escriben
+en la consola de la base, igual que en el lab (`GOTO.1 x y`, `CONGREGATION.1`,
+`OCCLUDE.10`).
 
 En Arch: usar el **flatpak** de Webots (`com.cyberbotics.webots`) — el paquete
 AUR `webots-bin` falla al iniciar el rendering. Detalles en `webots/TUTORIAL.md`.

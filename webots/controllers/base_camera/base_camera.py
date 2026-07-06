@@ -15,6 +15,12 @@ Consola: mandale UDP a 127.0.0.1:6060 con el formato del lab, p. ej.:
     echo -n "CONGREGATION.1"         | nc -u -w0 127.0.0.1 6060   (líder = 1)
     echo -n "OCCLUDE.10"             | nc -u -w0 127.0.0.1 6060   (cámara ciega 10s)
     echo -n "BROADCAST.EKF_NAV|1"    | nc -u -w0 127.0.0.1 6060
+
+MODO SOLO-CÁMARA (base real conectada): si al arrancar el puerto 6060 ya está
+tomado por AttaBot_Base.py --sim, este supervisor deja de hacer de base y se
+vuelve solo la cámara: emite CAM|id,x,y,ang;... (con jitter por robot) a
+127.0.0.1:6055 y atiende OCCLUDE/COLOR_QUERY en :6059. Los robots hablan
+directo con la base real. Orden de arranque: base primero, Webots después.
 """
 
 import json
@@ -22,11 +28,17 @@ import math
 import os
 import random
 import socket
+import sys
 
 from controller import Supervisor
 
 ARENA_W, ARENA_H = 2.4, 1.55          # m (Webots), arena centrada en el origen
 NOISE_POS, NOISE_ANG = 30.0, 2.0      # jitter ArUco genérico (mm, grados)
+
+# Modo SOLO-CÁMARA (base real corriendo AttaBot_Base.py --sim en :6060):
+VISION_FEED = ('127.0.0.1', 6055)     # adónde va el feed CAM|id,x,y,ang;...
+CONTROL_PORT = 6059                   # donde este supervisor recibe OCCLUDE/COLOR_QUERY
+CAM_INTERVAL = 0.05                   # s entre frames del feed (≈ la C920 del lab)
 
 # Jitter POR ROBOT: la marca de cada robot real es distinta (robot_profiles.json)
 try:
@@ -74,17 +86,27 @@ def camera_pose(node):
     return x, y, ang
 
 
+camera_only = False
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 try:
     sock.bind(('127.0.0.1', 6060))
 except OSError:
-    import sys
-    sys.exit('[base] puerto 6060 ocupado — ¿hay OTRO Webots abierto con este '
-             'mundo? Cerralo (flatpak kill com.cyberbotics.webots) y hacé Reset (⏮).')
+    # 6060 ocupado: o es la base REAL (--sim) o es otro Webots colgado.
+    # La base real NO usa SO_REUSEPORT en sim, así que este fallback es fiable.
+    try:
+        sock.bind(('127.0.0.1', CONTROL_PORT))
+        camera_only = True
+        print(f'[base] 6060 en uso → base REAL detectada. Modo SOLO-CÁMARA: '
+              f'feed CAM → :{VISION_FEED[1]}, control en :{CONTROL_PORT}')
+    except OSError:
+        sys.exit('[base] puertos 6060 y 6059 ocupados — ¿hay OTRO Webots abierto '
+                 'con este mundo? Cerralo (flatpak kill com.cyberbotics.webots) '
+                 'y hacé Reset (⏮).')
 sock.setblocking(False)
 
 occluded_until = 0.0
 last_pos_log = 0.0
+last_cam_feed = 0.0
 
 
 def robot_addr(rid):
@@ -94,6 +116,40 @@ def robot_addr(rid):
 def rid_from_port(port):
     rid = str(port - 6060)
     return rid if rid in robots else None
+
+
+def query_color(rid):
+    """APDS virtual: color del objeto a <250mm y ±45° del frente del robot."""
+    x, y, ang = camera_pose(robots[rid])
+    best, best_d = 'nada', 1e9
+    for color, node in objects:
+        ox, oy, _ = camera_pose(node)
+        d = math.hypot(ox - x, oy - y)
+        if d > 250 or d >= best_d:
+            continue
+        to_obj = math.degrees(math.atan2(oy - y, ox - x)) % 360
+        diff = abs(((to_obj - ang) + 180) % 360 - 180)
+        if diff < 45:
+            best, best_d = color, d
+    if best == 'nada' and min(x, y, 2400 - x, 1550 - y) < 220:
+        best = 'pared'
+    return best
+
+
+def handle_control(msg):
+    """Modo solo-cámara: comandos de la base real (OCCLUDE.n, COLOR_QUERY.rid)."""
+    global occluded_until
+    target, _, instruction = msg.partition('.')
+    if target == 'OCCLUDE':
+        occluded_until = sup.getTime() + float(instruction)
+        print(f'[base] cámara OCLUIDA por {instruction}s')
+    elif target == 'COLOR_QUERY':
+        rid = instruction.strip()
+        if rid in robots:
+            sock.sendto(f'COLOR_RESPONSE|{query_color(rid)}'.encode(),
+                        robot_addr(rid))
+    else:
+        print(f'[base] (solo-cámara) comando ignorado: {msg}')
 
 
 def handle_console(msg):
@@ -134,10 +190,34 @@ while sup.step(dt) != -1:
             x, y, ang = camera_pose(node)
             print(f'POS|{rid}|{x:.1f}|{y:.1f}|{ang:.1f}')
 
+    # Feed de visión a la base real (modo solo-cámara): detecciones con el
+    # jitter de cada marca. Ocluida = frame sin markers, como taparle el lente.
+    if camera_only and now - last_cam_feed >= CAM_INTERVAL:
+        last_cam_feed = now
+        if now < occluded_until:
+            payload = 'CAM|'
+        else:
+            items = []
+            for rid, node in sorted(robots.items()):
+                x, y, ang = camera_pose(node)
+                sp, sa = aruco_noise(rid)
+                items.append(f'{rid},{x + random.gauss(0, sp):.1f},'
+                             f'{y + random.gauss(0, sp):.1f},'
+                             f'{(ang + random.gauss(0, sa)) % 360:.1f}')
+            payload = 'CAM|' + ';'.join(items)
+        sock.sendto(payload.encode(), VISION_FEED)
+
     try:
         while True:
             data, addr = sock.recvfrom(512)
             msg = data.decode().strip()
+
+            if camera_only:
+                # Los robots hablan directo con la base real; aquí solo llega
+                # control (OCCLUDE/COLOR_QUERY reenviado por la base)
+                handle_control(msg)
+                continue
+
             sender = rid_from_port(addr[1])
 
             if sender is None:
@@ -153,21 +233,7 @@ while sup.step(dt) != -1:
                 sock.sendto(f'POSITION_RESPONSE|{x:.1f}|{y:.1f}|{ang:.1f}'.encode(),
                             addr)
             elif msg == 'COLOR_QUERY':
-                # APDS virtual: color del objeto a <250mm y ±45° del frente
-                x, y, ang = camera_pose(robots[sender])
-                best, best_d = 'nada', 1e9
-                for color, node in objects:
-                    ox, oy, _ = camera_pose(node)
-                    d = math.hypot(ox - x, oy - y)
-                    if d > 250 or d >= best_d:
-                        continue
-                    to_obj = math.degrees(math.atan2(oy - y, ox - x)) % 360
-                    diff = abs(((to_obj - ang) + 180) % 360 - 180)
-                    if diff < 45:
-                        best, best_d = color, d
-                if best == 'nada' and min(x, y, 2400 - x, 1550 - y) < 220:
-                    best = 'pared'
-                sock.sendto(f'COLOR_RESPONSE|{best}'.encode(), addr)
+                sock.sendto(f'COLOR_RESPONSE|{query_color(sender)}'.encode(), addr)
             elif msg.startswith('LEADER_POSITION'):
                 for rid in robots:
                     if rid != sender:
