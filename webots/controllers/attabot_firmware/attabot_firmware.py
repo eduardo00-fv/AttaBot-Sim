@@ -19,7 +19,10 @@ La conversión con el mundo Webots ocurre solo en dos puntos:
 Comandos soportados: MOVE|mm, TURN|deg, POSITIONGT|x|y, ABORT_NAV,
 CONGREGATION|líder|idx|n, CANCEL_CONGREGATION, LEADER_POSITION|id|x|y|θ,
 POSITION_RESPONSE|x|y|θ, GET_STATUS, EKF_NAV|0/1 (conmuta la nav a pose EKF),
-NAV_CONFIG|PARKING_DIST|mm.
+NAV_CONFIG|PARKING_DIST|mm, SEARCH_OBJECT|color, DISPERSE|mm (repulsión entre
+vecinos vía NEIGHBOR_POSITIONS|id,x,y;..., broadcast 1Hz de la base),
+FORMATION|linea/cuna/circulo|líder|idx|n (slot+staging del parking v2 con
+fórmula por figura; slots asignados por la base con anti-cruce).
 """
 
 import json
@@ -145,6 +148,14 @@ class AttabotFirmware:
         self.slot = None
         self.slot_angle = None
         self.staging_done = False
+
+        # Enjambre: dispersión (repulsión entre robots) y formaciones
+        self.neighbors = {}          # id → (x, y) del último NEIGHBOR_POSITIONS
+        self.disperse_target = None  # mm de separación objetivo (None = inactivo)
+        self.disperse_settled = False
+        self.disperse_blocked = 0    # rondas esperando a un id menor (anti-deadlock)
+        self.formation = None        # None (congregación clásica) | linea | cuna | circulo
+        self.formation_axis = 0.0    # ° extra sobre el eje perpendicular (base)
 
     # ── Utilidades ───────────────────────────────────────────────────────────
     def now_ms(self):
@@ -383,26 +394,130 @@ class AttabotFirmware:
         self.queue.append(('MOVE', seg))
         self.start_next()
 
-    # ── Congregación ─────────────────────────────────────────────────────────
-    def on_leader_position(self, lx, ly):
+    # ── Congregación y formaciones ───────────────────────────────────────────
+    def formation_slot(self, lx, ly, lang):
+        """Posición del slot propio según la figura activa.
+
+        linea: fila perpendicular al heading del líder, alternando lados
+               (idx 0→+1, 1→−1, 2→+2, ...), separación = parking_dist.
+        cuna:  V detrás del líder (offset diagonal atrás-lateral).
+        circulo / congregación clásica: distribución angular (con el latch
+               del lado del follower cuando n=1 — fix de julio).
+        """
+        s = self.parking_dist
+        if self.formation in ('linea', 'cuna'):
+            rad = math.radians(lang)
+            hx, hy = math.cos(rad), math.sin(rad)      # heading del líder
+            # Eje de la fila: perpendicular al heading + offset que asigna la
+            # base cuando la línea no cabe en la arena (FORMATION|...|axis)
+            pa = rad + math.pi / 2 + math.radians(self.formation_axis)
+            px, py = math.cos(pa), math.sin(pa)
+            k = self.cong_idx // 2 + 1
+            side = 1 if self.cong_idx % 2 == 0 else -1
+            if self.formation == 'linea':
+                ox, oy = side * k * s * px, side * k * s * py
+            else:
+                ox = -k * s * hx + side * k * s * px
+                oy = -k * s * hy + side * k * s * py
+            return (lx + ox, ly + oy)
+        # circulo explícito o congregación clásica
         if self.slot_angle is None:
-            if self.pose and self.cong_n == 1:
+            if self.pose and self.cong_n == 1 and self.formation is None:
                 self.slot_angle = math.atan2(self.pose[1] - ly, self.pose[0] - lx)
             else:
                 self.slot_angle = 2 * math.pi * self.cong_idx / max(1, self.cong_n)
         a = self.slot_angle
-        self.slot = (lx + self.parking_dist * math.cos(a),
-                     ly + self.parking_dist * math.sin(a))
-        goal_dist = self.parking_dist if self.staging_done else self.parking_dist + 150
-        goal = (lx + goal_dist * math.cos(a), ly + goal_dist * math.sin(a))
+        return (lx + s * math.cos(a), ly + s * math.sin(a))
+
+    def on_leader_position(self, lx, ly, lang):
+        self.slot = self.formation_slot(lx, ly, lang)
+        if self.staging_done:
+            goal = self.slot
+        elif self.formation in ('linea', 'cuna'):
+            # Staging POR DETRÁS de la fila (opuesto al heading del líder):
+            # cada robot entra a su slot por su propio carril. Staging radial
+            # aquí haría que el corredor de aproximación pase sobre los slots
+            # de los vecinos (churn de evasiones IR, visto en el E2E).
+            rad = math.radians(lang)
+            goal = (self.slot[0] - 150 * math.cos(rad),
+                    self.slot[1] - 150 * math.sin(rad))
+        else:
+            # Congregación/círculo: staging radial 150mm más lejos del líder
+            dx, dy = self.slot[0] - lx, self.slot[1] - ly
+            d = math.hypot(dx, dy) or 1.0
+            goal = (self.slot[0] + 150 * dx / d, self.slot[1] + 150 * dy / d)
         if not self.nav.is_active:
             self.nav.start(*goal)
-            self.debug(f'CONGREGATION slot {self.cong_idx}/{self.cong_n} → '
+            self.debug(f'{self.formation or "CONGREGATION"} slot '
+                       f'{self.cong_idx}/{self.cong_n} → '
                        f'{"parking" if self.staging_done else "staging"} '
                        f'({goal[0]:.0f},{goal[1]:.0f})')
             self.request_position()
         else:
             self.nav.goal_x, self.nav.goal_y = goal
+
+    # ── Dispersión (repulsión entre vecinos) ─────────────────────────────────
+    def maybe_disperse_hop(self):
+        """Con NEIGHBOR_POSITIONS fresco: si el vecino más cercano está a menos
+        del objetivo, saltar ~350mm en la dirección de repulsión (suma 1/d²)."""
+        if (not self.disperse_target or self.nav.is_active
+                or self.state != 'IDLE' or not self.pose or not self.neighbors):
+            return
+        x, y, _ = self.ekf.pose() if self.ekf_nav and self.ekf.initialized else self.pose
+        dists = {rid: math.hypot(x - nx, y - ny)
+                 for rid, (nx, ny) in self.neighbors.items()}
+        dmin = min(dists.values())
+        # Histéresis de 80mm (~2σ del jitter ArUco): un robot satisfecho no se
+        # des-satisface por ruido de medición
+        settle_at = self.disperse_target - (80 if self.disperse_settled else 0)
+        if dmin >= settle_at:
+            if not self.disperse_settled:
+                self.disperse_settled = True
+                self.debug(f'dispersión lograda — vecino más cercano a {dmin:.0f}mm')
+            return
+        self.disperse_settled = False
+        # Turno secuencial: solo salta el de MENOR id entre los que están
+        # demasiado cerca — el resto espera quieto. Con todos moviéndose a la
+        # vez, cada hop interrumpe al vecino por IR (947 evasiones en el E2E).
+        # Margen de 100mm: un vecino en la banda de jitter no bloquea (él se
+        # cree satisfecho y no se moverá — deadlock visto en el E2E #2). Y si
+        # igual quedamos bloqueados ~10s, saltar de todos modos.
+        blocking = [rid for rid, d in dists.items()
+                    if d < self.disperse_target - 100]
+        if any(int(rid) < int(self.robot_id) for rid in blocking):
+            self.disperse_blocked += 1
+            if self.disperse_blocked < 10:
+                return
+        self.disperse_blocked = 0
+        vx = vy = 0.0
+        for nx, ny in self.neighbors.values():
+            d = max(math.hypot(x - nx, y - ny), 1.0)
+            vx += (x - nx) / d ** 2
+            vy += (y - ny) / d ** 2
+        norm = math.hypot(vx, vy)
+        if norm < 1e-9:
+            ang = random.uniform(0, 2 * math.pi)
+            vx, vy, norm = math.cos(ang), math.sin(ang), 1.0
+        # Candidatos: repulsión directa y sus dos rotaciones ±90° (escape de
+        # esquina). Se elige el que deje al vecino más cercano MÁS LEJOS —
+        # rotar a ciegas puede mandar el salto de vuelta hacia el vecino.
+        best, best_score = None, -1.0
+        for rvx, rvy in ((vx, vy), (-vy, vx), (vy, -vx)):
+            gx = min(2050.0, max(350.0, x + rvx / norm * 450.0))
+            gy = min(1200.0, max(350.0, y + rvy / norm * 450.0))
+            if math.hypot(gx - x, gy - y) < 100.0:
+                continue
+            score = min(math.hypot(gx - nx, gy - ny)
+                        for nx, ny in self.neighbors.values())
+            if score > best_score:
+                best, best_score = (gx, gy), score
+        if best is None:
+            return
+        gx, gy = best
+        self.nav.start(gx, gy)
+        self.debug(f'dispersión: hop → ({gx:.0f},{gy:.0f}) '
+                   f'(vecino a {dmin:.0f}mm)')
+        self.nav_step((x, y, self.pose[2]))
 
     # ── Protocolo UDP ────────────────────────────────────────────────────────
     def handle(self, msg):
@@ -459,10 +574,47 @@ class AttabotFirmware:
         elif cmd == 'LEADER_POSITION':
             if self.cong_leader and parts[1] == self.cong_leader \
                and parts[1] != self.robot_id:
-                self.on_leader_position(float(parts[2]), float(parts[3]))
+                self.on_leader_position(float(parts[2]), float(parts[3]),
+                                        float(parts[4]))
+
+        elif cmd == 'FORMATION':
+            # FORMATION|linea/cuna/circulo|líder|idx|n|[axis°] — mismo flujo
+            # que CONGREGATION, solo cambia la fórmula del slot
+            self.formation = parts[1]
+            self.cong_leader = parts[2]
+            self.cong_idx = int(parts[3])
+            self.cong_n = int(parts[4])
+            self.formation_axis = float(parts[5]) if len(parts) > 5 else 0.0
+            self.slot = None
+            self.slot_angle = None
+            self.staging_done = False
+            if self.cong_leader == self.robot_id:
+                self.debug(f'Formación {self.formation}: soy líder')
+            else:
+                self.debug(f'Formación {self.formation}: slot '
+                           f'{self.cong_idx}/{self.cong_n}')
+            self.request_position()
+
+        elif cmd == 'DISPERSE':
+            self.disperse_target = float(parts[1]) if len(parts) > 1 else 600.0
+            self.disperse_settled = False
+            self.disperse_blocked = 0
+            self.debug(f'dispersión: separación objetivo '
+                       f'{self.disperse_target:.0f}mm')
+            self.request_position()
+
+        elif cmd == 'NEIGHBOR_POSITIONS':
+            self.neighbors = {}
+            for item in parts[1].split(';'):
+                rid, nx, ny = item.split(',')
+                if rid != self.robot_id:
+                    self.neighbors[rid] = (float(nx), float(ny))
+            self.maybe_disperse_hop()
 
         elif cmd in ('CANCEL_CONGREGATION', 'ABORT_NAV', 'STOP'):
             self.cong_leader = None
+            self.formation = None
+            self.disperse_target = None
             self.search_color = None
             self.awaiting_color = False
             self.nav.is_active = False

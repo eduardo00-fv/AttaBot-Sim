@@ -96,7 +96,7 @@ Solid {
   children [ Shape { appearance PBRAppearance { baseColor 0.85 0.08 0.08 roughness 0.7 metalness 0 } geometry Cylinder { radius 0.04 height 0.08 } } ]
   boundingObject Cylinder { radius 0.04 height 0.08 }
 }
-# ── Robots (coords cámara: Atta_1 en (300,300), Atta_2 en (300,1200)) ─────
+# ── Robots (coords cámara: 1=(300,300), 2=(300,1200), 3=(300,750), 4=(600,750))
 AttaBot {
   translation -0.9 0.475 0
   name "Atta_1"
@@ -108,6 +108,18 @@ AttaBot {
   name "Atta_2"
   customData "2"
   bodyColor 0.2 0.35 0.75
+}
+AttaBot {
+  translation -0.9 0.025 0
+  name "Atta_3"
+  customData "3"
+  bodyColor 0.7 0.25 0.7
+}
+AttaBot {
+  translation -0.6 0.025 0
+  name "Atta_4"
+  customData "4"
+  bodyColor 0.75 0.65 0.15
 }
 # ── Base virtual (cámara ArUco simulada + router UDP) ─────────────────────
 Robot {
