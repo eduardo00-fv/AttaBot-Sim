@@ -7,11 +7,12 @@ Con la base REAL controlando Webots:
   1. DISPERSE|600  — los 4 robots parten en clúster (mín. ~450mm) y se
      repelen hasta que cada uno tiene a su vecino más cercano a ≥600mm.
      Métrica: distancia mínima entre pares (ground truth POS de Webots).
-  2. FORMATION.linea 1 — fila perpendicular al heading del líder con slots
-     asignados por la base (anti-cruce). Métrica: distancias al líder
-     esperadas {300, 300, 600} ±120mm.
+  2. FORMATION.{linea,cuna,circulo} 1 — el líder se fija en el centro y cada
+     figura re-asigna a los seguidores con slots anti-cruce de la base.
+     Métrica (ground truth POS, espaciado s=250): linea [s,s,2s], cuna
+     [s√2,s√2,2s√2], circulo [s,s,s], cada distancia al líder ±120mm.
 
-Uso: python tools/experimento_enjambre.py [--base-dir ...]
+Uso: python tools/experimento_enjambre.py [--base-dir ...] [--world ...]
 """
 
 import argparse
@@ -135,18 +136,22 @@ def main():
               f'{d0:.0f} → {d1:.0f}mm / objetivo {DISPERSE_TARGET:.0f} '
               f'({len(settled_ids)}/4 auto-confirmaron)', flush=True)
 
-        # ── 2. Formación en línea (líder 1) ──────────────────────────────────
+        # ── 2. Formaciones: linea, cuna, circulo (líder 1) ───────────────────
+        # El líder va UNA vez al centro despejado (1200,775) mirando al este y se
+        # queda fijo (marca "soy líder", no toma slot); cada figura sólo re-asigna
+        # a los 3 seguidores. Aprobación por ground truth: distancia de cada
+        # seguidor al líder vs. el slot esperado, sondeando hasta tolerancia (±120)
+        # o deadline. Distancias esperadas con n=3 seguidores y espaciado s:
+        #   linea [s, s, 2s] · cuna [s√2, s√2, 2s√2] · circulo [s, s, s]
+        # (offsets: linea ±k·s perpendicular; cuna ±k·s perp − k·s atrás;
+        #  circulo radio s a 2π·idx/n). En (1200,775) las tres caben en axis=0.
         console('BROADCAST.CANCEL_CONGREGATION')
         time.sleep(2)
-        # Posicionar al líder en la única banda despejada para una fila con
-        # espaciado 250 (entre las cajas y el cilindro rojo): (1580,875)
-        # mirando al este — la perpendicular vertical no cabe y la base debe
-        # caer al eje del heading (fila horizontal hacia el oeste)
+        LX, LY, S = 1200.0, 775.0, 250.0
         mark = len(base_tail.lines)
-        console('GOTO.1 1580 875')
-        idx = base_tail.wait_for('NAV: llegó', 150, start=mark)
-        if idx is None:
-            print('[exp] FATAL: el líder no llegó a la banda libre')
+        console(f'GOTO.1 {LX:.0f} {LY:.0f}')
+        if base_tail.wait_for('NAV: llegó', 150, start=mark) is None:
+            print('[exp] FATAL: el líder no llegó al centro')
             return 1
         time.sleep(2)
         _, _, lang = latest_poses(webots_tail)['1']
@@ -154,35 +159,33 @@ def main():
         console(f'1.TURN|{delta:.0f}')   # heading este (0°)
         time.sleep(8)
 
-        # Igual que la dispersión: la aprobación se mide sobre las posiciones
-        # ground truth (distancia de cada seguidor al líder vs. el slot esperado),
-        # sondeando hasta que las 3 caigan en tolerancia o venza el deadline. Las
-        # "NAV: llegó" quedan como diagnóstico (dependen de la pose del seguidor).
-        mark = len(base_tail.lines)
-        console('FORMATION.linea 1 250')
-        expected = [250, 250, 500]
-        arrivals, deadline, dists = 0, time.time() + 300, None
-        while time.time() < deadline:
-            with base_tail.lock:
-                for line in base_tail.lines[mark:]:
-                    if 'NAV: llegó' in line and 'ID: 1,' not in line:
-                        arrivals += 1
-                mark = len(base_tail.lines)
-            poses = latest_poses(webots_tail)
-            if all(r in poses for r in ('1', '2', '3', '4')):
-                lx, ly, _ = poses['1']
-                dists = sorted(math.dist((lx, ly), poses[r][:2])
-                               for r in ('2', '3', '4'))
-                if all(abs(d - e) <= 120 for d, e in zip(dists, expected)):
-                    break
-            time.sleep(5)
-        form_ok = dists is not None and all(
-            abs(d - e) <= 120 for d, e in zip(dists, expected))
-        ok &= form_ok
-        shown = [f'{d:.0f}' for d in dists] if dists else 'n/a'
-        print(f'[exp] {"✓" if form_ok else "✗"} formación linea (ground truth): '
-              f'distancias al líder {shown} (esperado ~{expected}, '
-              f'{arrivals}/3 auto-confirmaron)', flush=True)
+        r2 = math.sqrt(2)
+        shapes = [
+            ('linea',   sorted([S, S, 2 * S])),
+            ('cuna',    sorted([S * r2, S * r2, 2 * S * r2])),
+            ('circulo', sorted([S, S, S])),
+        ]
+        for shape, expected in shapes:
+            console('BROADCAST.CANCEL_CONGREGATION')
+            time.sleep(2)
+            console(f'FORMATION.{shape} 1 {S:.0f}')
+            deadline, dists = time.time() + 240, None
+            while time.time() < deadline:
+                poses = latest_poses(webots_tail)
+                if all(r in poses for r in ('1', '2', '3', '4')):
+                    lx, ly, _ = poses['1']
+                    dists = sorted(math.dist((lx, ly), poses[r][:2])
+                                   for r in ('2', '3', '4'))
+                    if all(abs(d - e) <= 120 for d, e in zip(dists, expected)):
+                        break
+                time.sleep(5)
+            shape_ok = dists is not None and all(
+                abs(d - e) <= 120 for d, e in zip(dists, expected))
+            ok &= shape_ok
+            shown = [f'{d:.0f}' for d in dists] if dists else 'n/a'
+            print(f'[exp] {"✓" if shape_ok else "✗"} formación {shape} '
+                  f'(ground truth): distancias al líder {shown} '
+                  f'(esperado ~{[round(e) for e in expected]})', flush=True)
 
         console('BREAK')
         time.sleep(3)
