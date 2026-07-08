@@ -154,6 +154,7 @@ class AttabotFirmware:
         self.disperse_target = None  # mm de separación objetivo (None = inactivo)
         self.disperse_settled = False
         self.disperse_blocked = 0    # rondas esperando a un id menor (anti-deadlock)
+        self.disperse_dmin_hist = []  # últimas dmin p/ suavizar la confirmación
         self.formation = None        # None (congregación clásica) | linea | cuna | circulo
         self.formation_axis = 0.0    # ° extra sobre el eje perpendicular (base)
 
@@ -467,13 +468,19 @@ class AttabotFirmware:
         dists = {rid: math.hypot(x - nx, y - ny)
                  for rid, (nx, ny) in self.neighbors.items()}
         dmin = min(dists.values())
+        # Suavizado: decidir la confirmación sobre la MEDIANA de las últimas 3
+        # lecturas de dmin. Un solo tick de NEIGHBOR con jitter no debe disparar
+        # ni cancelar la confirmación — filtra outliers de medición (robot 4
+        # llegó a auto-medir 555mm en un hop intermedio estando ya a 892mm real).
+        self.disperse_dmin_hist = (self.disperse_dmin_hist + [dmin])[-3:]
+        dmin_s = sorted(self.disperse_dmin_hist)[len(self.disperse_dmin_hist) // 2]
         # Histéresis de 80mm (~2σ del jitter ArUco): un robot satisfecho no se
         # des-satisface por ruido de medición
         settle_at = self.disperse_target - (80 if self.disperse_settled else 0)
-        if dmin >= settle_at:
+        if dmin_s >= settle_at:
             if not self.disperse_settled:
                 self.disperse_settled = True
-                self.debug(f'dispersión lograda — vecino más cercano a {dmin:.0f}mm')
+                self.debug(f'dispersión lograda — vecino más cercano a {dmin_s:.0f}mm')
             return
         self.disperse_settled = False
         # Turno secuencial: solo salta el de MENOR id entre los que están
@@ -499,16 +506,22 @@ class AttabotFirmware:
             ang = random.uniform(0, 2 * math.pi)
             vx, vy, norm = math.cos(ang), math.sin(ang), 1.0
         # Candidatos: repulsión directa y sus dos rotaciones ±90° (escape de
-        # esquina). Se elige el que deje al vecino más cercano MÁS LEJOS —
-        # rotar a ciegas puede mandar el salto de vuelta hacia el vecino.
-        best, best_score = None, -1.0
+        # esquina). Se elige el que deje al vecino más cercano lejos SIN pegarse
+        # a una pared: un objetivo en la esquina maximiza la separación pero deja
+        # al robot raspando dos muros → decenas de evasiones IR y un IDLE que
+        # nunca llega (robot 4 acumuló 348 evasiones así, target hacia (350,1200)).
+        # El bono de holgura (≤+150mm) desempata hacia el interior cuando la
+        # separación de los candidatos es comparable.
+        best, best_score = None, -1e9
         for rvx, rvy in ((vx, vy), (-vy, vx), (vy, -vx)):
             gx = min(2050.0, max(350.0, x + rvx / norm * 450.0))
             gy = min(1200.0, max(350.0, y + rvy / norm * 450.0))
             if math.hypot(gx - x, gy - y) < 100.0:
                 continue
-            score = min(math.hypot(gx - nx, gy - ny)
-                        for nx, ny in self.neighbors.values())
+            nd = min(math.hypot(gx - nx, gy - ny)
+                     for nx, ny in self.neighbors.values())
+            wall_clear = min(gx - 350.0, 2050.0 - gx, gy - 350.0, 1200.0 - gy)
+            score = nd + 0.5 * min(wall_clear, 300.0)
             if score > best_score:
                 best, best_score = (gx, gy), score
         if best is None:
@@ -599,6 +612,7 @@ class AttabotFirmware:
             self.disperse_target = float(parts[1]) if len(parts) > 1 else 600.0
             self.disperse_settled = False
             self.disperse_blocked = 0
+            self.disperse_dmin_hist = []
             self.debug(f'dispersión: separación objetivo '
                        f'{self.disperse_target:.0f}mm')
             self.request_position()

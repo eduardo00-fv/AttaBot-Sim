@@ -28,6 +28,11 @@ from experimento_base_real import Tail, kill_webots, DEFAULT_BASE, WORLD  # noqa
 
 RAW_LOG = '/tmp/experimento_enjambre.log'
 RE_POS = re.compile(r'^POS\|(\d+)\|(-?[\d.]+)\|(-?[\d.]+)\|(-?[\d.]+)')
+DISPERSE_TARGET = 600.0   # mm de separación mínima objetivo (ground truth)
+# El enjambre corre en la arena SIN el campo de obstáculos: dispersión y
+# formación son geometría inter-robot y las cajas solo bloquean al líder camino
+# al ancla. La evasión/búsqueda se validan aparte en attabot.wbt.
+SWARM_WORLD = os.path.join(os.path.dirname(WORLD), 'attabot_swarm.wbt')
 
 
 def latest_poses(tail):
@@ -50,6 +55,8 @@ def min_pairwise(poses):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--base-dir', default=DEFAULT_BASE)
+    ap.add_argument('--world', default=SWARM_WORLD,
+                    help='mundo Webots (por defecto la arena despejada de enjambre)')
     a = ap.parse_args()
 
     env = dict(os.environ)
@@ -82,7 +89,7 @@ def main():
     webots = subprocess.Popen(
         ['flatpak', 'run', '--filesystem=home', 'com.cyberbotics.webots',
          '--no-rendering', '--batch', '--minimize', '--mode=realtime',
-         '--stdout', '--stderr', WORLD],
+         '--stdout', '--stderr', a.world],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
     webots_tail = Tail(webots, 'webots', raw)
 
@@ -95,10 +102,15 @@ def main():
         time.sleep(5)
 
         # ── 1. Dispersión ────────────────────────────────────────────────────
+        # Métrica de aprobación = separación mínima real medida por el supervisor
+        # de Webots (ground truth POS). El observador externo es el instrumento
+        # del experimento; las auto-confirmaciones del enjambre ("dispersión
+        # lograda") se cuentan solo como diagnóstico, porque dependen de la pose
+        # ruidosa de cada robot y de atrapar un tick IDLE y pueden ir rezagadas.
         d0 = min_pairwise(latest_poses(webots_tail))
         print(f'[exp] separación mínima inicial: {d0:.0f}mm', flush=True)
         mark = len(base_tail.lines)
-        console('BROADCAST.DISPERSE|600')
+        console(f'BROADCAST.DISPERSE|{DISPERSE_TARGET:.0f}')
 
         settled_ids = set()
         deadline = time.time() + 420
@@ -109,19 +121,19 @@ def main():
                     m = re.search(r'ID: (\d+), dispersión lograda', line)
                     if m and m.group(1) not in settled_ids:
                         settled_ids.add(m.group(1))
-                        print(f'[exp] robot {m.group(1)} disperso '
+                        print(f'[exp] robot {m.group(1)} confirmó '
                               f'({len(settled_ids)}/4, t={time.time()-t0:.0f}s)',
                               flush=True)
                 mark = len(base_tail.lines)
             d1 = min_pairwise(latest_poses(webots_tail))
-            if len(settled_ids) == 4 and d1 >= 550:
+            if d1 >= DISPERSE_TARGET:            # separación física lograda
                 break
             time.sleep(5)
-        disp_ok = len(settled_ids) == 4 and d1 >= 500
+        disp_ok = d1 >= DISPERSE_TARGET
         ok &= disp_ok
-        print(f'[exp] {"✓" if disp_ok else "✗"} dispersión: mínima '
-              f'{d0:.0f} → {d1:.0f}mm ({len(settled_ids)}/4 confirmaron)',
-              flush=True)
+        print(f'[exp] {"✓" if disp_ok else "✗"} dispersión (ground truth): mínima '
+              f'{d0:.0f} → {d1:.0f}mm / objetivo {DISPERSE_TARGET:.0f} '
+              f'({len(settled_ids)}/4 auto-confirmaron)', flush=True)
 
         # ── 2. Formación en línea (líder 1) ──────────────────────────────────
         console('BROADCAST.CANCEL_CONGREGATION')
@@ -142,25 +154,35 @@ def main():
         console(f'1.TURN|{delta:.0f}')   # heading este (0°)
         time.sleep(8)
 
+        # Igual que la dispersión: la aprobación se mide sobre las posiciones
+        # ground truth (distancia de cada seguidor al líder vs. el slot esperado),
+        # sondeando hasta que las 3 caigan en tolerancia o venza el deadline. Las
+        # "NAV: llegó" quedan como diagnóstico (dependen de la pose del seguidor).
         mark = len(base_tail.lines)
         console('FORMATION.linea 1 250')
-        arrivals, deadline = 0, time.time() + 300
-        while arrivals < 3 and time.time() < deadline:
-            idx = base_tail.wait_for('NAV: llegó', 20, start=mark)
-            if idx is not None:
-                mark = idx
-                arrivals += 1
-        time.sleep(2)
-        poses = latest_poses(webots_tail)
-        lx, ly, _ = poses['1']
-        dists = sorted(math.dist((lx, ly), poses[r][:2]) for r in ('2', '3', '4'))
         expected = [250, 250, 500]
-        form_ok = (arrivals >= 3 and
-                   all(abs(d - e) <= 120 for d, e in zip(dists, expected)))
+        arrivals, deadline, dists = 0, time.time() + 300, None
+        while time.time() < deadline:
+            with base_tail.lock:
+                for line in base_tail.lines[mark:]:
+                    if 'NAV: llegó' in line and 'ID: 1,' not in line:
+                        arrivals += 1
+                mark = len(base_tail.lines)
+            poses = latest_poses(webots_tail)
+            if all(r in poses for r in ('1', '2', '3', '4')):
+                lx, ly, _ = poses['1']
+                dists = sorted(math.dist((lx, ly), poses[r][:2])
+                               for r in ('2', '3', '4'))
+                if all(abs(d - e) <= 120 for d, e in zip(dists, expected)):
+                    break
+            time.sleep(5)
+        form_ok = dists is not None and all(
+            abs(d - e) <= 120 for d, e in zip(dists, expected))
         ok &= form_ok
-        print(f'[exp] {"✓" if form_ok else "✗"} formación linea: distancias al '
-              f'líder {[f"{d:.0f}" for d in dists]} (esperado ~{expected}, '
-              f'{arrivals}/3 llegadas)', flush=True)
+        shown = [f'{d:.0f}' for d in dists] if dists else 'n/a'
+        print(f'[exp] {"✓" if form_ok else "✗"} formación linea (ground truth): '
+              f'distancias al líder {shown} (esperado ~{expected}, '
+              f'{arrivals}/3 auto-confirmaron)', flush=True)
 
         console('BREAK')
         time.sleep(3)
