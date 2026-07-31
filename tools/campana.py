@@ -241,6 +241,7 @@ def min_clearance(log_path, scn):
         h = v[3] if len(v) >= 4 else w
         boxes.append((x, y, w, h))
     worst = float('inf')
+    total = touching = 0
     try:
         with open(log_path) as f:
             for r in _csv.DictReader(f):
@@ -248,15 +249,29 @@ def min_clearance(log_path, scn):
                     x, y = float(r['x']), float(r['y'])
                 except (KeyError, TypeError, ValueError):
                     continue
+                total += 1
+                near = float('inf')
                 for (ox, oy, w, h) in boxes:
                     dx = max(abs(x - ox) - w / 2.0, 0.0)
                     dy = max(abs(y - oy) - h / 2.0, 0.0)
-                    d = math.hypot(dx, dy) - ROBOT_RADIUS_MM
-                    if d < worst:
-                        worst = d
+                    near = min(near, math.hypot(dx, dy) - ROBOT_RADIUS_MM)
+                if near < 0:
+                    touching += 1
+                worst = min(worst, near)
     except OSError:
         return None
-    return None if worst == float('inf') else worst
+    if worst == float('inf'):
+        return None
+    return worst, (100.0 * touching / total if total else 0.0)
+
+
+# Tolerancia del veredicto. El mínimo sobre TODAS las muestras de TODOS los
+# robots es maximamente sensible: una corrida buena de 10 robots × 300s salía
+# INVÁLIDA por 26 muestras de 20160 (0.13%) con 0.79mm de profundidad, o sea un
+# roce. Empujar de verdad se ve como penetración SOSTENIDA, no como un pico
+# sub-milimétrico, así que el veredicto mira profundidad Y permanencia.
+CONTACT_DEPTH_MM = 5.0      # ~10% del radio del robot
+CONTACT_TIME_PCT = 1.0      # % de muestras en contacto
 
 
 
@@ -338,23 +353,36 @@ def main():
             print(f'    {verdict} → {tag}', flush=True)
             if os.path.exists(gt_path):
                 shutil.copy2(gt_path, os.path.join(a.out, os.path.basename(gt_path)))
-            clr = min_clearance(gt_path, scn) if os.path.exists(gt_path) else None
+            cl = min_clearance(gt_path, scn) if os.path.exists(gt_path) else None
+            clr, pct = cl if cl is not None else (None, None)
             if clr is not None:
-                if clr <= 0:
-                    print(f'    ⚠ INVÁLIDA: tocó los obstáculos ({clr:.0f}mm) — '
-                          f'cruzó empujando, no navegando', flush=True)
+                if clr <= -CONTACT_DEPTH_MM or pct > CONTACT_TIME_PCT:
+                    print(f'    ⚠ INVÁLIDA: {clr:.1f}mm de penetración, '
+                          f'{pct:.2f}% del tiempo en contacto — cruzó empujando',
+                          flush=True)
+                elif clr < 0:
+                    print(f'    holgura mínima {clr:.1f}mm (roce: {pct:.2f}% del '
+                          f'tiempo, dentro de tolerancia)', flush=True)
                 else:
                     print(f'    holgura mínima {clr:.0f}mm', flush=True)
             row = {'session': tag, 'scenario': scn['name'],
                    'scenario_json': os.path.splitext(world)[0] + '.scenario.json',
-                   'rep': rep, 'clearance_mm': ('' if clr is None else f'{clr:.1f}')}
+                   'rep': rep, 'clearance_mm': ('' if clr is None else f'{clr:.1f}'),
+                   'contact_pct': ('' if pct is None else f'{pct:.2f}'),
+                   # El destino va al manifiesto para que analyze_logs mida la
+                   # convergencia contra ESE punto: contra el centroide, un
+                   # enjambre atascado antes de la barrera cuenta como llegado.
+                   'target': (f'{_dest[0]:.0f},{_dest[1]:.0f}'
+                              if (_dest := plan.get('destino')) else '')}
             new_rows.append(row)
             header = not os.path.exists(manifest_path)
             with open(manifest_path, 'a', newline='') as f:
                 if header:
-                    f.write('session,scenario,scenario_json,rep,clearance_mm\n')
+                    f.write('session,scenario,scenario_json,rep,clearance_mm,'
+                            'contact_pct,target\n')
                 f.write(f'{row["session"]},{row["scenario"]},'
-                        f'{row["scenario_json"]},{rep},{row["clearance_mm"]}\n')
+                        f'{row["scenario_json"]},{rep},{row["clearance_mm"]},'
+                        f'{row["contact_pct"]},{row["target"]}\n')
     raw.close()
 
     done = len(new_rows)
