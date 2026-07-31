@@ -3,3 +3,9 @@ __pycache__/
 sim_output_*.png
 webots/worlds/.attabot.wbproj
 *.log
+videos/
+webots/worlds/camp_*
+webots/worlds/topo_*
+webots/gt_logs/
+webots/worlds/.*.wbproj*
+webots/worlds/.*.jpg

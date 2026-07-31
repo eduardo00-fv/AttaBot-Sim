@@ -78,6 +78,12 @@ def newest(pattern):
 def kill_webots():
     subprocess.run(['flatpak', 'kill', 'com.cyberbotics.webots'],
                    stderr=subprocess.DEVNULL)
+    # Una base huérfana de una corrida anterior se queda con el 6060 y la
+    # siguiente muere con "base no tomó el 6060". En una campaña larga eso
+    # deja huecos sueltos en el manifiesto.
+    subprocess.run(['pkill', '-f', 'AttaBot_Base.py --sim'],
+                   stderr=subprocess.DEVNULL)
+    time.sleep(1)
 
 
 def main():

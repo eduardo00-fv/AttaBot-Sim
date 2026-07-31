@@ -32,7 +32,10 @@ import sys
 
 from controller import Supervisor
 
-ARENA_W, ARENA_H = 2.4, 1.55          # m (Webots), arena centrada en el origen
+# Arena (m, Webots, centrada en el origen). Es solo el DEFAULT: al arrancar se
+# lee del piso del mundo (Solid "floor"), porque cambia por escenario — lab
+# 2.4×1.75, simulación grande de 10 robots 3.8×2.8.
+ARENA_W, ARENA_H = 2.4, 1.55
 NOISE_POS, NOISE_ANG = 30.0, 2.0      # jitter ArUco genérico (mm, grados)
 
 # Modo SOLO-CÁMARA (base real corriendo AttaBot_Base.py --sim en :6060):
@@ -68,11 +71,38 @@ for i in range(children.getCount()):
         robots[rid] = node
     elif node.getTypeName() == 'Solid':
         name = node.getField('name').getSFString()
+        if name == 'floor':
+            # El piso ES la arena: de ahí sale la conversión Webots↔cámara.
+            try:
+                size = (node.getField('boundingObject').getSFNode()
+                        .getField('size').getSFVec3f())
+                ARENA_W, ARENA_H = size[0], size[1]
+            except (AttributeError, TypeError):
+                print('[base] ⚠ no pude leer el tamaño del piso; uso el default')
         for prefix, color in COLOR_BY_NAME.items():
             if name.startswith(prefix):
                 objects.append((color, node))
 print(f'[base] robots detectados: {sorted(robots)} · '
-      f'objetos: {[c for c, _ in objects]}')
+      f'objetos: {[c for c, _ in objects]} · '
+      f'arena {ARENA_W:.2f}×{ARENA_H:.2f}m')
+
+
+# Traza de posición VERDADERA (sin el ruido ArUco). El PositionLog que consume
+# analyze_logs.py lleva jitter de sigma=30mm a propósito, así que no sirve para
+# preguntar si un robot tocó un obstáculo: sobre miles de muestras el mínimo
+# siempre cae en la cola negativa. Con esto la pregunta "¿cruzó navegando o
+# empujando?" se contesta con datos exactos.
+GT_PATH = os.environ.get('SIM_GT_LOG')
+gt_file = None
+if GT_PATH:
+    try:
+        os.makedirs(os.path.dirname(GT_PATH), exist_ok=True)
+        gt_file = open(GT_PATH, 'w', buffering=1)
+        gt_file.write('t,robot,x,y,angle\n')
+    except OSError as e:
+        # Webots corre en el sandbox de flatpak: fuera de él la ruta no existe.
+        # La traza es diagnóstico, nunca debe tumbar la corrida.
+        print(f'[base] sin traza GT ({e})')
 
 
 def camera_pose(node):
@@ -108,6 +138,16 @@ occluded_until = 0.0
 last_pos_log = 0.0
 last_cam_feed = 0.0
 
+# ── Grabación de video (ATTABOT_MOVIE=/ruta/salida.mp4) ──────────────────────
+# Video nativo de Webots: graba la vista 3D, sin depender del compositor. Pide
+# render, así que Webots NO puede correr con --no-rendering. Se cierra con
+# MOVIE_STOP (el archivo queda corrupto si matás Webots grabando).
+MOVIE_PATH = os.environ.get('ATTABOT_MOVIE')
+movie_stopping = False
+if MOVIE_PATH:
+    sup.movieStartRecording(MOVIE_PATH, 1280, 720, 0, 90, 1, False)
+    print(f'[base] grabando video → {MOVIE_PATH}')
+
 
 def robot_addr(rid):
     return ('127.0.0.1', 6060 + int(rid))
@@ -131,9 +171,18 @@ def query_color(rid):
         diff = abs(((to_obj - ang) + 180) % 360 - 180)
         if diff < 45:
             best, best_d = color, d
-    if best == 'nada' and min(x, y, 2400 - x, 1550 - y) < 220:
+    if best == 'nada' and min(x, y, ARENA_W * 1000 - x, ARENA_H * 1000 - y) < 220:
         best = 'pared'
     return best
+
+
+def stop_movie():
+    """Cierra el video en curso; el archivo recién sirve cuando movieIsReady()."""
+    global movie_stopping
+    if MOVIE_PATH and not movie_stopping:
+        sup.movieStopRecording()
+        movie_stopping = True
+        print('[base] cerrando video…')
 
 
 def handle_control(msg):
@@ -143,6 +192,8 @@ def handle_control(msg):
     if target == 'OCCLUDE':
         occluded_until = sup.getTime() + float(instruction)
         print(f'[base] cámara OCLUIDA por {instruction}s')
+    elif target == 'MOVIE_STOP':
+        stop_movie()
     elif target == 'COLOR_QUERY':
         rid = instruction.strip()
         if rid in robots:
@@ -158,6 +209,8 @@ def handle_console(msg):
     if target == 'OCCLUDE':
         occluded_until = sup.getTime() + float(instruction)
         print(f'[base] cámara OCLUIDA por {instruction}s')
+    elif target == 'MOVIE_STOP':
+        stop_movie()
     elif target == 'CONGREGATION':
         leader = instruction.strip()
         followers = sorted(r for r in robots if r != leader)
@@ -183,6 +236,14 @@ while sup.step(dt) != -1:
         occluded_until = 0.0
         print(f'[base] cámara RESTAURADA (t={now:.1f}s)')
 
+    if movie_stopping:
+        if sup.movieFailed():
+            print('[base] ✗ VIDEO FALLÓ (¿Webots sin render?)')
+            movie_stopping = False
+        elif sup.movieIsReady():
+            print(f'[base] ✓ VIDEO LISTO: {MOVIE_PATH}')
+            movie_stopping = False
+
     # Log periódico de poses reales (para métricas/validación externa)
     if now - last_pos_log >= 0.5:
         last_pos_log = now
@@ -200,6 +261,9 @@ while sup.step(dt) != -1:
             items = []
             for rid, node in sorted(robots.items()):
                 x, y, ang = camera_pose(node)
+                if gt_file is not None:
+                    gt_file.write(f'{sup.getTime():.2f},{rid},'
+                                  f'{x:.1f},{y:.1f},{ang:.1f}\n')
                 sp, sa = aruco_noise(rid)
                 items.append(f'{rid},{x + random.gauss(0, sp):.1f},'
                              f'{y + random.gauss(0, sp):.1f},'

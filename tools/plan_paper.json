@@ -1,0 +1,22 @@
+{
+  "_notas": [
+    "Plan de la campaña del paper de topología — sim 3.8×2.8, 10 robots.",
+    "PENDIENTE decisión de JC: la ocupación NO puede ser igual en las 4 celdas",
+    "(techo geométrico: chicos+amplio topa en 2.11% en esta arena). Con este",
+    "plan la ocupación VARÍA y se reporta como covariable → ANCOVA, no ANOVA.",
+    "solve = ocupación_objetivo%,lado_mm,pasaje_mm — el .scenario.json de cada",
+    "corrida registra lo LOGRADO (occupancy_pct, passage_d) para el análisis.",
+    "Pasajes: estrecho=2d=300mm, amplio=3.5d=525mm. Cajas: 1d=150, 2.3d=350."
+  ],
+  "arena": "3.8,2.8",
+  "robots": 10,
+  "leader": 1,
+  "base_seed": 20260729,
+  "scenarios": [
+    {"name": "A_base"},
+    {"name": "B_chico_estrecho", "solve": "6,150,300"},
+    {"name": "C_chico_amplio",   "solve": "6,150,525"},
+    {"name": "D_grande_estrecho","solve": "6,350,300"},
+    {"name": "E_grande_amplio",  "solve": "6,350,525"}
+  ]
+}

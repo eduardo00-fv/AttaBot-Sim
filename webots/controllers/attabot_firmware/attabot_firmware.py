@@ -43,6 +43,23 @@ WHEEL_RADIUS_MM = 22.25
 CENTER_TO_WHEEL = 41.5
 IR_THRESHOLD_M  = 0.20      # obstáculo si el IR reporta menos de esto
 
+# Escape de deadlock reactivo (port de EvasionTracker del firmware, utils.h:245):
+# tras N evasiones consecutivas dentro de la ventana, el rodeo suave no basta
+# (obstáculo entre robot y slot, u obstáculo+pared) → maniobra comprometida.
+EVADE_MAX       = 3          # evasiones seguidas antes de forzar el escape
+EVADE_RESET_MS  = 6000       # ventana: sin evasión por este tiempo → contador a 0
+ESCAPE_TURN     = 95.0       # ° del giro de rodeo comprometido
+ESCAPE_MOVE     = 300.0      # mm del tramo comprometido (sin interrumpir)
+ARENA_W_MM      = 2400.0     # arena (marco cámara) — escape hacia el interior.
+ARENA_H_MM      = 1750.0     # Solo el default: la base la manda por
+                             # NAV_CONFIG|ARENA|w|h porque cambia por escenario.
+
+# Random walk (RANDOMW|segundos) — tablas EXACTAS de SelectMovementRW del
+# firmware (AttaBot.ino:127-128). El protocolo del paper de topología arranca
+# cada corrida con 60s de esto, así que la fidelidad acá pesa en los datos.
+RW_ANGLES    = (30, 45, 60, 75, 90, 135, 180)   # ° (possibleAngles)
+RW_ADVANCES  = (200, 250, 300, 350)             # mm (possibleAdvances)
+
 PROP_K_SIDE  = 55.0         # ° de bias lateral máximo (evasión proporcional)
 PROP_K_FRONT = 70.0         # ° de bias frontal máximo (tuneado en sim 2026-07-05)
 AVOID_HORIZON = 0.45        # m — distancia de reacción (tuneado en sim 2026-07-05)
@@ -53,6 +70,13 @@ TURN_LEAD    = 3.0          # ° de brake-lead (como el firmware)
 TURN_TOL     = 3.0          # ° tolerancia final
 TURN_MAX_COR = 4            # correcciones iterativas máximas
 SETTLE_MS    = 300
+
+# MEET (congregación sobre un punto virtual). Mismos valores que el firmware:
+# el anillo sale de la SEPARACIÓN entre slots vecinos, R = sep/(2·sin(π/n)), que
+# es el radio con el que la CUERDA entre dos slots contiguos mide MEET_SEP.
+MEET_SEP = 250.0            # mm centro a centro entre slots vecinos
+MEET_RMIN = 200.0           # mm piso: cuerpo 150mm + error de pose
+MEET_MAX_ROBOTS = 12        # = DisperseState::MAX_NEIGHBORS + 1 del firmware
 
 BASE_ADDR = ('127.0.0.1', 6060)
 PROFILES_PATH = os.path.join(os.path.dirname(__file__), '..', '..',
@@ -129,10 +153,25 @@ class AttabotFirmware:
         # Evasión: 'binary' = umbral fijo (los IR de hoy); 'prop' = bias
         # proporcional a la distancia (lo que habilitaría un ToF VL53L0X)
         self.avoid_mode = 'binary'
+        self.arena_w = ARENA_W_MM        # mm — vía NAV_CONFIG|ARENA (escape)
+        self.arena_h = ARENA_H_MM
         self.ir_range = IR_THRESHOLD_M   # m — alcance efectivo del sensor
         self.prop_k_side = PROP_K_SIDE       # tuneables vía NAV_CONFIG|PROP|...
         self.prop_k_front = PROP_K_FRONT
         self.avoid_horizon = AVOID_HORIZON
+        # Tracker de evasiones consecutivas → escape de deadlock (ver EVADE_*)
+        self.evade_count = 0
+        self.evade_last_ms = -1e9
+        self.escaping = False        # True durante el rodeo comprometido (sin interrumpir)
+        self.escape_toggle = False   # alterna el lado cuando ambos IR empatan
+
+        # Random walk (RANDOMW): presupuesto de tiempo restante y contabilidad
+        # al estilo del case RANDOM_WALK del firmware — se descuenta lo que duró
+        # cada movimiento (incluidas evasiones) al volver a la cola vacía.
+        self.rw_budget_ms = 0.0
+        self.rw_last_ms = 0.0
+        self.rw_obstacle = False   # espeja obstacleDetected: el próximo paso
+                                   # será solo-giro, para despegarse
 
         # Búsqueda semántica (SEARCH_OBJECT|color): patrulla aleatoria +
         # aproximación al detectar + consulta de color (APDS virtual/real)
@@ -147,7 +186,10 @@ class AttabotFirmware:
         self.parking_dist = 300.0
         self.slot = None
         self.slot_angle = None
+        self.slot_radius = self.parking_dist   # crece si el líder quedó contra pared
         self.staging_done = False
+        self.virtual_target = None   # CONGREGATION|VIRTUAL: punto fijo, sin líder
+        self.self_seen = None        # pose propia SEGÚN el último NEIGHBOR_POSITIONS
 
         # Enjambre: dispersión (repulsión entre robots) y formaciones
         self.neighbors = {}          # id → (x, y) del último NEIGHBOR_POSITIONS
@@ -176,6 +218,28 @@ class AttabotFirmware:
     def read_ir_dist(self):
         """Distancias en metros (lo que daría un ToF real)."""
         return {k: d.getValue() for k, d in self.irs.items()}
+
+    def escape_turn(self, d):
+        """Lado del rodeo de escape: el que deja el tramo comprometido más
+        adentro de la arena (lejos de paredes). Corrige el thrash en esquina
+        que se veía cuando el IR-abierto apuntaba a una pared: proyecta el
+        tramo de escape por cada lado y toma el más interior. Sin pose → cae
+        al criterio IR (lado más lejano, alternando si empatan)."""
+        if self.pose:
+            px, py, _ = self.pose
+            best, best_score = ESCAPE_TURN, -1e9
+            for turn in (-ESCAPE_TURN, ESCAPE_TURN):
+                th = math.radians((self.yaw + turn) % 360)
+                ex = px + ESCAPE_MOVE * math.cos(th)
+                ey = py + ESCAPE_MOVE * math.sin(th)
+                score = min(ex, self.arena_w - ex, ey, self.arena_h - ey)
+                if score > best_score:
+                    best, best_score = turn, score
+            return best
+        if abs(d['left'] - d['right']) < 0.05:
+            self.escape_toggle = not self.escape_toggle
+            return -ESCAPE_TURN if self.escape_toggle else ESCAPE_TURN
+        return -ESCAPE_TURN if d['left'] > d['right'] else ESCAPE_TURN
 
     def set_wheels(self, vl, vr):
         # Desbalance físico de motores del robot real (deriva en MOVE, giros
@@ -211,8 +275,33 @@ class AttabotFirmware:
         self.ekf.predict(d, d_yaw)
         return d_yaw
 
+    # ── Random walk (port 1:1 de SelectMovementRW, AttaBot.ino) ──────────────
+    def select_rw(self):
+        """UN paso del random walk: 15% giro+, 70% avance, 15% giro−. Tras un
+        obstáculo el avance se anula (solo giros) — mismo sesgo del firmware."""
+        p_move = 0 if self.rw_obstacle else 70
+        self.rw_obstacle = False
+        r = random.randrange(15 + p_move + 15)
+        if r < 15:
+            return ('TURN', float(random.choice(RW_ANGLES)))
+        if r < 15 + p_move:
+            return ('MOVE', float(random.choice(RW_ADVANCES)))
+        return ('TURN', -float(random.choice(RW_ANGLES)))
+
     # ── Máquina de estados de movimiento ─────────────────────────────────────
     def start_next(self):
+        if not self.queue and self.rw_budget_ms > 0 and not self.nav.is_active:
+            # Contabilidad del firmware: al volver a la cola vacía se descuenta
+            # lo que duró el movimiento anterior (evasiones incluidas) y, si
+            # queda presupuesto, se encola el siguiente paso.
+            now = self.now_ms()
+            self.rw_budget_ms -= now - self.rw_last_ms
+            self.rw_last_ms = now
+            if self.rw_budget_ms > 0:
+                self.queue.append(self.select_rw())
+            else:
+                self.rw_budget_ms = 0.0
+                self.debug('Random Walk terminado')
         if not self.queue:
             self.state = 'IDLE'
             if self.nav.is_active and not self.waiting_pos:
@@ -289,7 +378,9 @@ class AttabotFirmware:
                 return
             # Sin chequeo de emergencia al RETROCEDER (los sensores frontales
             # siguen viendo el obstáculo del que nos alejamos)
-            if self.move_sign > 0:
+            # Durante el rodeo comprometido (escaping) NO se interrumpe: el
+            # tramo largo debe completarse para librar el obstáculo de lado.
+            if self.move_sign > 0 and not self.escaping:
                 if self.avoid_mode == 'prop':
                     # Proporcional: el bias ya curvó la ruta — frenar solo en
                     # emergencia real (el segmento en curso es recto)
@@ -299,14 +390,37 @@ class AttabotFirmware:
                 else:
                     emergency = any(self.read_ir().values())
                 if emergency:
+                    self.rw_obstacle = True   # el próximo paso RW será solo-giro
                     self.stop_motors()
-                    # Evasión COMPROMETIDA (como el firmware real: giro ±45-60
-                    # + avance). Solo retroceder no basta: deja al obstáculo
-                    # justo fuera del alcance del sensor y el re-planeo ciego
-                    # vuelve a apuntarle (vaivén infinito, visto en sim).
                     # TURN positivo = derecha (CW visto desde arriba, marco
                     # cámara). Izquierda más libre → girar izquierda = negativo
                     d = self.read_ir_dist()
+                    # Tracker de evasiones consecutivas (port de EvasionTracker,
+                    # firmware utils.h:245): dentro de la ventana, cada evasión
+                    # suma; tras N seguidas el rodeo suave está en deadlock
+                    # (obstáculo entre robot y slot, u obstáculo+pared) → escape.
+                    now = self.now_ms()
+                    if now - self.evade_last_ms > EVADE_RESET_MS:
+                        self.evade_count = 0
+                    self.evade_count += 1
+                    self.evade_last_ms = now
+                    if self.evade_count >= EVADE_MAX:
+                        # Giro grande + tramo largo SIN re-apuntar = rodeo que
+                        # rompe el mínimo local. El lado se elige hacia el
+                        # interior de la arena (escape_turn) para no meterse en
+                        # la pared/esquina.
+                        turn = self.escape_turn(d)
+                        self.debug(f'DEADLOCK ({EVADE_MAX} evasiones) — escape '
+                                   f'comprometido {turn:+.0f}°')
+                        self.escaping = True
+                        self.evade_count = 0
+                        self.queue = [('MOVE', -150.0), ('TURN', turn),
+                                      ('MOVE', ESCAPE_MOVE)]
+                        self.start_next()
+                        return
+                    # Evasión normal COMPROMETIDA (giro ±60 + avance). Solo
+                    # retroceder no basta: deja el obstáculo fuera de alcance y
+                    # el re-planeo ciego vuelve a apuntarle.
                     side = -60.0 if d['left'] > d['right'] else 60.0
                     self.debug(f'MOVE interrumpido por IR — evasión {side:+.0f}°')
                     self.queue = [('MOVE', -80.0), ('TURN', side),
@@ -315,12 +429,64 @@ class AttabotFirmware:
                     return
             if self.move_acc >= self.move_target:
                 self.stop_motors()
+                self.escaping = False   # fin del tramo (incl. rodeo de escape)
                 self.debug('Movimiento completado')
                 self.start_next()
+
+    # ── MEET: reparto de slots del anillo por cercanía ───────────────────────
+    def meet_slot_index(self, tx, ty, ring, n):
+        """Port 1:1 de MeetSlotIndex() del firmware: greedy por cercanía + 2-opt.
+
+        Que todos los robots lleguen al MISMO reparto sin negociar no es
+        casualidad: el insumo es el último NEIGHBOR_POSITIONS, un mensaje
+        idéntico para todos, y el orden por id fija el desempate. Por eso la
+        pose propia sale de ese barrido (`self.self_seen`) y no de `self.pose`,
+        que cada robot refresca en un instante distinto.
+        """
+        pts = dict(self.neighbors)
+        pts[self.robot_id] = self.self_seen or (
+            (self.pose[0], self.pose[1]) if self.pose else (0.0, 0.0))
+        ids = sorted(pts, key=int)[:n]
+        count = len(ids)
+        if count <= 1:
+            return 0
+        pos = [pts[i] for i in ids]
+        slots = [(tx + ring * math.cos(2.0 * math.pi * s / count),
+                  ty + ring * math.sin(2.0 * math.pi * s / count))
+                 for s in range(count)]
+
+        asg = list(range(count))
+        free_r, free_s = set(range(count)), set(range(count))
+        while free_r and free_s:                    # greedy: el par más corto gana
+            r, s = min(((r, s) for r in free_r for s in free_s),
+                       key=lambda p: math.dist(pos[p[0]], slots[p[1]]))
+            asg[r] = s
+            free_r.discard(r)
+            free_s.discard(s)
+
+        # 2-opt: intercambiar dos slots mientras eso acorte la suma de recorridos.
+        # Es lo que garantiza que no queden caminos CRUZADOS — si dos se cruzaran,
+        # intercambiarlos acortaría la suma por desigualdad triangular. El greedy
+        # solo no lo asegura. El epsilon evita el intercambio eterno de empatados.
+        for _ in range(2 * MEET_MAX_ROBOTS):
+            improved = False
+            for a in range(count - 1):
+                for b in range(a + 1, count):
+                    now = (math.dist(pos[a], slots[asg[a]])
+                           + math.dist(pos[b], slots[asg[b]]))
+                    swp = (math.dist(pos[a], slots[asg[b]])
+                           + math.dist(pos[b], slots[asg[a]]))
+                    if swp < now - 0.01:
+                        asg[a], asg[b] = asg[b], asg[a]
+                        improved = True
+            if not improved:
+                break
+        return asg[ids.index(self.robot_id)] if self.robot_id in ids else 0
 
     # ── Navegación (ciclo GT del firmware) ───────────────────────────────────
     def request_position(self):
         self.waiting_pos = True
+        self.escaping = False    # el rodeo terminó; nav re-planifica limpio
         self.last_request = self.now_ms()
         self.send_base('REQUEST_POSITION')
 
@@ -423,12 +589,57 @@ class AttabotFirmware:
             return (lx + ox, ly + oy)
         # circulo explícito o congregación clásica
         if self.slot_angle is None:
-            if self.pose and self.cong_n == 1 and self.formation is None:
-                self.slot_angle = math.atan2(self.pose[1] - ly, self.pose[0] - lx)
-            else:
-                self.slot_angle = 2 * math.pi * self.cong_idx / max(1, self.cong_n)
+            single = (self.cong_n == 1 and self.formation is None and self.pose)
+            bearing = (math.atan2(self.pose[1] - ly, self.pose[0] - lx)
+                       if single else 0.0)
+            self.slot_angle, self.slot_radius = self.safe_ring_slot(
+                lx, ly, self.cong_idx, max(1, self.cong_n), s, bearing, single)
         a = self.slot_angle
-        return (lx + s * math.cos(a), ly + s * math.sin(a))
+        r = self.slot_radius
+        return (lx + r * math.cos(a), ly + r * math.sin(a))
+
+    def safe_ring_slot(self, lx, ly, idx, n, nominal_r, bearing, use_bearing):
+        """Port 1:1 de SafeRingSlotAngle del firmware. Anillo wall-safe
+        DETERMINISTA: todos los seguidores calculan el mismo con datos que ya
+        comparten (líder, n, arena) y cada uno toma su índice. La corrección
+        greedy por-robot ENCIMABA slots contra la pared (medido 2026-07-27:
+        5 de 9 slots a 31-62mm entre sí, enjambre sin asentar). Los n slots se
+        reparten sobre el arco seguro más largo; si no alcanza para n cuerpos
+        (MIN_ARC c/u), el radio crece. Retorna (ángulo, radio_efectivo)."""
+        MARGIN, MIN_ARC, NS = 200.0, 250.0, 72
+        STEP = 2.0 * math.pi / NS
+        fallback = bearing if use_bearing else 2.0 * math.pi * idx / n
+        for gi, g in enumerate((1.0, 1.2, 1.4, 1.7, 2.0, 2.5)):
+            r = nominal_r * g
+            safe = [(MARGIN <= lx + r * math.cos(k * STEP) <= self.arena_w - MARGIN
+                     and MARGIN <= ly + r * math.sin(k * STEP) <= self.arena_h - MARGIN)
+                    for k in range(NS)]
+            if all(safe):
+                return fallback, r
+            if not any(safe):
+                continue
+            best_start = best_len = cur_len = 0
+            cur_start = -1
+            for k in range(2 * NS):
+                if safe[k % NS]:
+                    if cur_len == 0:
+                        cur_start = k % NS
+                    cur_len += 1
+                    if best_len < cur_len <= NS:
+                        best_len, best_start = cur_len, cur_start
+                else:
+                    cur_len = 0
+            arc = best_len * STEP
+            if r * arc >= n * MIN_ARC or gi == 5:
+                a0 = best_start * STEP
+                if use_bearing:
+                    rel = (bearing - a0) % (2.0 * math.pi)
+                    if rel <= arc:
+                        return bearing, r
+                    return (a0 if (2.0 * math.pi - rel) < (rel - arc)
+                            else a0 + arc), r
+                return a0 + (idx + 0.5) * arc / n, r
+        return fallback, nominal_r
 
     def on_leader_position(self, lx, ly, lang):
         self.slot = self.formation_slot(lx, ly, lang)
@@ -550,12 +761,17 @@ class AttabotFirmware:
                 self.ekf.update_aruco(x, y, ang)
                 self.debug(f'EKF innov={innov:.0f}mm '
                            f'est=({self.ekf.x:.0f},{self.ekf.y:.0f})')
+            if self.virtual_target is not None:
+                # Sin líder que difunda: el punto fijo dispara el recálculo acá
+                self.on_leader_position(self.virtual_target[0],
+                                        self.virtual_target[1], 0.0)
             if self.cong_leader == self.robot_id:
                 self.send_base(f'LEADER_POSITION|{self.robot_id}|{x:.1f}|{y:.1f}|{ang:.1f}')
             if self.nav.is_active and self.state == 'IDLE':
                 self.nav_step(self.ekf.pose() if self.ekf_nav else self.pose)
 
         elif cmd in ('POSITIONGT', 'GT'):
+            self.rw_budget_ms = 0.0   # como el instructionList.clear() del firmware
             self.nav.start(float(parts[1]), float(parts[2]))
             self.debug(f'GT iniciado: goal=({parts[1]},{parts[2]})')
             self.request_position()
@@ -570,12 +786,76 @@ class AttabotFirmware:
             if self.state == 'IDLE':
                 self.start_next()
 
+        elif cmd == 'RANDOMW':
+            # RANDOMW|segundos — protocolo del paper: 60s antes de congregar
+            self.rw_budget_ms = float(parts[1]) * 1000.0
+            self.rw_last_ms = self.now_ms()
+            self.rw_obstacle = False
+            self.debug(f'Random walk: {parts[1]}s')
+            if self.state == 'IDLE' and not self.queue:
+                self.queue.append(self.select_rw())
+                self.start_next()
+
+        elif cmd == 'MEET':
+            # MEET|x|y[|R] — port del handler homónimo del firmware. Es lo que
+            # manda campana.py en la fase de congregación del paper; sin este
+            # bloque la réplica lo ignoraba en silencio y la fase entera era un
+            # no-op (los robots quedaban donde los dejó el random walk).
+            #
+            # A diferencia de CONGREGATION|VIRTUAL, acá la base NO reparte los
+            # slots: cada robot calcula el suyo desde el último
+            # NEIGHBOR_POSITIONS, que es idéntico para todos.
+            self.rw_budget_ms = 0.0
+            tx, ty = float(parts[1]), float(parts[2])
+            n = min(len(self.neighbors) + 1, MEET_MAX_ROBOTS)
+            ring = (MEET_SEP / (2.0 * math.sin(math.pi / n)) if n >= 2
+                    else MEET_RMIN)
+            ring = max(ring, MEET_RMIN)
+            if len(parts) > 3 and parts[3]:
+                forced = float(parts[3])
+                if 150.0 <= forced <= 600.0:
+                    ring = forced
+            self.cong_leader = 'VIRTUAL'
+            self.virtual_target = (tx, ty)
+            self.cong_n = n
+            self.cong_idx = self.meet_slot_index(tx, ty, ring, n)
+            self.slot = None
+            self.slot_angle = None
+            self.slot_radius = ring
+            self.parking_dist = ring
+            self.staging_done = False
+            self.nav.is_active = False
+            self.debug(f'MEET en ({tx:.0f},{ty:.0f}), '
+                       f'slot {self.cong_idx}/{n}, anillo {ring:.0f}mm')
+            self.request_position()
+
+        elif cmd == 'CONGREGATION' and parts[1] == 'VIRTUAL':
+            # Port de CONGREGATION|VIRTUAL del firmware: congregarse alrededor de
+            # un PUNTO. Nadie difunde LEADER_POSITION, así que el slot se
+            # recalcula con cada pose propia nueva (el punto es fijo).
+            self.rw_budget_ms = 0.0
+            self.cong_leader = 'VIRTUAL'
+            self.virtual_target = (float(parts[2]), float(parts[3]))
+            self.cong_idx = int(parts[4])
+            self.cong_n = int(parts[5]) if len(parts) > 5 else 1
+            self.slot = None
+            self.slot_angle = None
+            self.slot_radius = self.parking_dist
+            self.staging_done = False
+            self.nav.is_active = False
+            self.debug(f'Congregación VIRTUAL en ({parts[2]},{parts[3]}), '
+                       f'slot {self.cong_idx}/{self.cong_n}')
+            self.request_position()
+
         elif cmd == 'CONGREGATION':
+            self.rw_budget_ms = 0.0   # el random walk cede a la congregación
+            self.virtual_target = None
             self.cong_leader = parts[1]
             self.cong_idx = int(parts[2])
             self.cong_n = int(parts[3]) if len(parts) > 3 else 1
             self.slot = None
             self.slot_angle = None
+            self.slot_radius = self.parking_dist
             self.staging_done = False
             if self.cong_leader == self.robot_id:
                 self.debug('Congregación: soy líder')
@@ -600,6 +880,7 @@ class AttabotFirmware:
             self.formation_axis = float(parts[5]) if len(parts) > 5 else 0.0
             self.slot = None
             self.slot_angle = None
+            self.slot_radius = self.parking_dist
             self.staging_done = False
             if self.cong_leader == self.robot_id:
                 self.debug(f'Formación {self.formation}: soy líder')
@@ -619,10 +900,17 @@ class AttabotFirmware:
 
         elif cmd == 'NEIGHBOR_POSITIONS':
             self.neighbors = {}
+            self.self_seen = None
             for item in parts[1].split(';'):
                 rid, nx, ny = item.split(',')
                 if rid != self.robot_id:
                     self.neighbors[rid] = (float(nx), float(ny))
+                else:
+                    # La pose propia SEGÚN ESTE BARRIDO. MEET la necesita aparte
+                    # de self.pose: el reparto de slots solo da igual en todos
+                    # los robots si todos parten del mismo insumo, y self.pose
+                    # se refresca en un instante distinto en cada uno.
+                    self.self_seen = (float(nx), float(ny))
             self.maybe_disperse_hop()
 
         elif cmd in ('CANCEL_CONGREGATION', 'ABORT_NAV', 'STOP'):
@@ -632,6 +920,7 @@ class AttabotFirmware:
             self.search_color = None
             self.awaiting_color = False
             self.nav.is_active = False
+            self.rw_budget_ms = 0.0
             self.queue.clear()
             self.stop_motors()
             self.state = 'IDLE'
@@ -678,6 +967,10 @@ class AttabotFirmware:
         elif cmd == 'NAV_CONFIG' and parts[1] == 'AVOID':
             self.avoid_mode = 'prop' if parts[2] == 'prop' else 'binary'
             self.debug(f'evasión={self.avoid_mode}')
+
+        elif cmd == 'NAV_CONFIG' and parts[1] == 'ARENA':
+            self.arena_w, self.arena_h = float(parts[2]), float(parts[3])
+            self.debug(f'arena={self.arena_w:.0f}x{self.arena_h:.0f}mm')
 
         elif cmd == 'NAV_CONFIG' and parts[1] == 'IR_RANGE':
             self.ir_range = float(parts[2])
