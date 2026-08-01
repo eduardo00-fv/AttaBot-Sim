@@ -1,0 +1,197 @@
+#VRML_SIM R2025a utf8
+# Mundo de CONGREGACIÓN CON OBSTÁCULOS (4 robots) — experimento del paper.
+# Líder Atta_1 al centro (cam 1200,775); 3 seguidores repartidos; 3 cajas de
+# obstáculo entre cada seguidor y su slot del anillo de 300mm, para forzar
+# evasión activa por IR mientras se congregan. Misma arena/frame que el lab
+# (2.4×1.55m). Conversión cam↔Webots: x_w=x_cam/1000−1.2 · y_w=0.775−y_cam/1000.
+# La topología de obstáculos se cambia moviendo las 3 cajas (ver comentarios).
+
+EXTERNPROTO "../protos/AttaBot.proto"
+
+WorldInfo {
+  basicTimeStep 8
+  contactProperties [
+    ContactProperties {
+      material1 "attabot_body"
+      coulombFriction [
+        0.05
+      ]
+    }
+    ContactProperties {
+      material1 "attabot_wheel"
+      coulombFriction [
+        3
+      ]
+    }
+  ]
+}
+Viewpoint {
+  orientation 0 1 0 1.2
+  position -2.411694064956788 -0.07749430552014819 5.813420485245233
+}
+Background {
+  skyColor [
+    0.6 0.7 0.8
+  ]
+}
+DirectionalLight {
+  direction 0.3 -0.2 -1
+  intensity 2.5
+  castShadows TRUE
+}
+Solid {
+  translation 0 0 -0.01
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 0.85 0.85 0.82
+        roughness 1
+        metalness 0
+      }
+      geometry Box {
+        size 2.4 1.55 0.02
+      }
+    }
+  ]
+  name "floor"
+  boundingObject Box {
+    size 2.4 1.55 0.02
+  }
+}
+Solid {
+  translation 0 0.785 0.05
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 0.4 0.4 0.45
+        roughness 1
+        metalness 0
+      }
+      geometry Box {
+        size 2.44 0.02 0.1
+      }
+    }
+  ]
+  name "wall north"
+  boundingObject Box {
+    size 2.44 0.02 0.1
+  }
+}
+Solid {
+  translation 0 -0.785 0.05
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 0.4 0.4 0.45
+        roughness 1
+        metalness 0
+      }
+      geometry Box {
+        size 2.44 0.02 0.1
+      }
+    }
+  ]
+  name "wall south"
+  boundingObject Box {
+    size 2.44 0.02 0.1
+  }
+}
+Solid {
+  translation 1.21 0 0.05
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 0.4 0.4 0.45
+        roughness 1
+        metalness 0
+      }
+      geometry Box {
+        size 0.02 1.55 0.1
+      }
+    }
+  ]
+  name "wall east"
+  boundingObject Box {
+    size 0.02 1.55 0.1
+  }
+}
+Solid {
+  translation -1.21 0 0.05
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 0.4 0.4 0.45
+        roughness 1
+        metalness 0
+      }
+      geometry Box {
+        size 0.02 1.55 0.1
+      }
+    }
+  ]
+  name "wall west"
+  boundingObject Box {
+    size 0.02 1.55 0.1
+  }
+}
+# ── Campo de obstáculos "3_cajas" (topología del lab) ─────────────────────
+# Una caja de frente en el corredor de cada seguidor, con espacio a ambos lados
+# para curvar (los seguidores están lejos de las paredes → la evasión reactiva
+# no deadlockea), y fuera del anillo de staging (r>450mm del líder). Mover estas
+# 3 traslaciones = cambiar la topología. cam ≈:
+#   box1 (750,500)  box2 (750,1050)  box3 (1800,775)
+Solid {
+  name "obstacle box"
+  translation -0.45 0.275 0.05
+  children [ Shape { appearance PBRAppearance { baseColor 0.55 0.35 0.2 roughness 1 metalness 0 } geometry Box { size 0.15 0.15 0.1 } } ]
+  boundingObject Box { size 0.15 0.15 0.1 }
+}
+Solid {
+  name "obstacle box 2"
+  translation -0.45 -0.275 0.05
+  children [ Shape { appearance PBRAppearance { baseColor 0.55 0.35 0.2 roughness 1 metalness 0 } geometry Box { size 0.15 0.15 0.1 } } ]
+  boundingObject Box { size 0.15 0.15 0.1 }
+}
+Solid {
+  name "obstacle box 3"
+  translation 0.6 0 0.05
+  children [ Shape { appearance PBRAppearance { baseColor 0.55 0.35 0.2 roughness 1 metalness 0 } geometry Box { size 0.15 0.15 0.1 } } ]
+  boundingObject Box { size 0.15 0.15 0.1 }
+}
+# ── Robots — líder al centro, seguidores repartidos (lejos de paredes) ─────
+# cam: 1=(1200,775) líder · 2=(400,500) · 3=(400,1050) · 4=(2000,775)
+# Los seguidores a ≥500mm de las paredes N/S para que su IR lateral no las
+# detecte y no entren en deadlock de evasión al arrancar.
+AttaBot {
+  translation 0 0 0
+  rotation 0 0 1 0
+  name "Atta_1"
+  customData "1"
+  bodyColor 0.85 0.85 0.85
+}
+AttaBot {
+  translation -0.8 0.275 0
+  rotation 0 0 1 0
+  name "Atta_2"
+  customData "2"
+  bodyColor 0.2 0.35 0.75
+}
+AttaBot {
+  translation -0.8 -0.275 0
+  rotation 0 0 1 0
+  name "Atta_3"
+  customData "3"
+  bodyColor 0.7 0.25 0.7
+}
+AttaBot {
+  translation 0.8 0 0
+  rotation 0 0 1 0
+  name "Atta_4"
+  customData "4"
+  bodyColor 0.75 0.65 0.15
+}
+Robot {
+  name "base_camera"
+  controller "base_camera"
+  supervisor TRUE
+}

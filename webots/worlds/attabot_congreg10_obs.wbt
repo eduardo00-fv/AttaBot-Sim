@@ -1,0 +1,161 @@
+#VRML_SIM R2025a utf8
+# Mundo generado por gen_world.py — 10 robots, arena 3.8×2.8 m, 2 obstáculo(s).
+# Convención cam↔Webots: x_w=x_mm/1000−1.900 · y_w=1.400−y_mm/1000.
+
+EXTERNPROTO "../protos/AttaBot.proto"
+
+WorldInfo {
+  basicTimeStep 8
+  contactProperties [
+    ContactProperties {
+      material1 "attabot_body"
+      coulombFriction [ 0.05 ]
+    }
+    ContactProperties {
+      material1 "attabot_wheel"
+      coulombFriction [ 3 ]
+    }
+  ]
+}
+Viewpoint {
+  orientation 0 1 0 1.0075
+  position -4.335 -0.077 6.865
+}
+Background { skyColor [ 0.6 0.7 0.8 ] }
+DirectionalLight { direction 0.3 -0.2 -1 intensity 2.5 castShadows TRUE }
+
+Solid {
+  translation 0 0 -0.01
+  children [ Shape { appearance PBRAppearance { baseColor 0.85 0.85 0.82 roughness 1 metalness 0 }
+    geometry Box { size 3.8 2.8 0.02 } } ]
+  name "floor"
+  boundingObject Box { size 3.8 2.8 0.02 }
+}
+
+Solid {
+  translation 0.000 1.410 0.05
+  children [ Shape { appearance PBRAppearance { baseColor 0.4 0.4 0.45 roughness 1 metalness 0 } geometry Box { size 3.840 0.020 0.1 } } ]
+  name "wall north"
+  boundingObject Box { size 3.840 0.020 0.1 }
+}
+
+Solid {
+  translation 0.000 -1.410 0.05
+  children [ Shape { appearance PBRAppearance { baseColor 0.4 0.4 0.45 roughness 1 metalness 0 } geometry Box { size 3.840 0.020 0.1 } } ]
+  name "wall south"
+  boundingObject Box { size 3.840 0.020 0.1 }
+}
+
+Solid {
+  translation 1.910 0.000 0.05
+  children [ Shape { appearance PBRAppearance { baseColor 0.4 0.4 0.45 roughness 1 metalness 0 } geometry Box { size 0.020 2.800 0.1 } } ]
+  name "wall east"
+  boundingObject Box { size 0.020 2.800 0.1 }
+}
+
+Solid {
+  translation -1.910 0.000 0.05
+  children [ Shape { appearance PBRAppearance { baseColor 0.4 0.4 0.45 roughness 1 metalness 0 } geometry Box { size 0.020 2.800 0.1 } } ]
+  name "wall west"
+  boundingObject Box { size 0.020 2.800 0.1 }
+}
+
+Solid {
+  name "obstacle box"
+  translation -0.750 0.500 0.05
+  children [ Shape { appearance PBRAppearance { baseColor 0.55 0.35 0.2 roughness 1 metalness 0 } geometry Box { size 0.350 0.350 0.1 } } ]
+  boundingObject Box { size 0.350 0.350 0.1 }
+}
+
+Solid {
+  name "obstacle box 2"
+  translation 0.750 -0.500 0.05
+  children [ Shape { appearance PBRAppearance { baseColor 0.55 0.35 0.2 roughness 1 metalness 0 } geometry Box { size 0.350 0.350 0.1 } } ]
+  boundingObject Box { size 0.350 0.350 0.1 }
+}
+
+AttaBot {
+  translation 0.0000 0.0000 0
+  rotation 0 0 1 0
+  name "Atta_1"
+  customData "1"
+  bodyColor 0.85 0.85 0.85
+}
+
+AttaBot {
+  translation 1.4250 0.0000 0
+  rotation 0 0 1 0
+  name "Atta_2"
+  customData "2"
+  bodyColor 0.7 0.25 0.7
+}
+
+AttaBot {
+  translation 1.0916 0.6749 0
+  rotation 0 0 1 0
+  name "Atta_3"
+  customData "3"
+  bodyColor 0.75 0.65 0.15
+}
+
+AttaBot {
+  translation 0.2474 1.0340 0
+  rotation 0 0 1 0
+  name "Atta_4"
+  customData "4"
+  bodyColor 0.2 0.6 0.3
+}
+
+AttaBot {
+  translation -0.7125 0.9093 0
+  rotation 0 0 1 0
+  name "Atta_5"
+  customData "5"
+  bodyColor 0.85 0.4 0.2
+}
+
+AttaBot {
+  translation -1.3391 0.3591 0
+  rotation 0 0 1 0
+  name "Atta_6"
+  customData "6"
+  bodyColor 0.3 0.55 0.8
+}
+
+AttaBot {
+  translation -1.3391 -0.3591 0
+  rotation 0 0 1 0
+  name "Atta_7"
+  customData "7"
+  bodyColor 0.6 0.3 0.55
+}
+
+AttaBot {
+  translation -0.7125 -0.9093 0
+  rotation 0 0 1 0
+  name "Atta_8"
+  customData "8"
+  bodyColor 0.5 0.5 0.2
+}
+
+AttaBot {
+  translation 0.2474 -1.0340 0
+  rotation 0 0 1 0
+  name "Atta_9"
+  customData "9"
+  bodyColor 0.25 0.7 0.6
+}
+
+AttaBot {
+  translation 1.0916 -0.6749 0
+  rotation 0 0 1 0
+  name "Atta_10"
+  customData "10"
+  bodyColor 0.8 0.55 0.35
+}
+
+Robot {
+  name "base_camera"
+  controller "base_camera"
+  supervisor TRUE
+}
